@@ -8,26 +8,14 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(moveit_ros_planning_interface REQUIRED)
-find_package(robot_state_publisher REQUIRED)
+find_package(dobot_msgs_v4 REQUIRED)
 
-add_executable(controller src/controller.cpp)
-target_include_directories(controller PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(controller PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-ament_target_dependencies(
-  controller
-  "rclcpp"
-  "moveit_ros_planning_interface"
-  "robot_state_publisher"
-)
+add_executable(script_runner src/script_runner.cpp)
+ament_target_dependencies(script_runner rclcpp dobot_msgs_v4)
 
-install(TARGETS controller
-  DESTINATION lib/${PROJECT_NAME})
-
-install(DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}/
+install(TARGETS
+  script_runner
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
