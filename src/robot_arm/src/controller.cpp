@@ -31,8 +31,9 @@ int main(int argc, char **argv)
 
   if (success)
   {
-    move_group.execute(plan);
-    RCLCPP_INFO(node->get_logger(), "✅ Move successful.");
+    RCLCPP_INFO(node->get_logger(), "Planning successful.");
+    // move_group.execute(plan);
+    
   }
   else
   {
