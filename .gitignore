@@ -1,0 +1,47 @@
+# === ROS 2 colcon build artifacts ===
+build/
+install/
+log/
+
+# === Python artifacts ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# === CMake artifacts ===
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# === VSCode / JetBrains IDEs ===
+.vscode/
+.idea/
+
+# === ROS launch/config files (optional, comment out if you want to include these) ===
+*.launch.py~
+*.yaml~
+*.rviz~
+
+# === Backup files ===
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# === Colcon metadata ===
+.colcon/
+
+# === Git keep marker ===
+!.gitkeep
+
+# === ROS 2 Doxygen/docs (optional) ===
+docs/
+
+# === Misc ===
+.DS_Store
+Thumbs.db
