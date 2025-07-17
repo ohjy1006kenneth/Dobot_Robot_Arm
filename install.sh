@@ -7,6 +7,7 @@ sudo apt install ros-humble-moveit
 
 # ugv_sdk
 sudo apt-get install build-essential git cmake libasio-dev
+sudo apt install can-utils
 
 # Femto Mega
 sudo apt install libgflags-dev nlohmann-json3-dev  \
