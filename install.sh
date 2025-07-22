@@ -4,6 +4,9 @@ sudo apt install ros-humble-joint-state-broadcaster
 sudo apt install ros-humble-ros2controlcli
 sudo apt install ros-humble-ros2-controllers
 sudo apt install ros-humble-moveit
+sudo apt install ros-humble-image-transport
+pip install opencv-python
+pip install "numpy<2"
 
 # ugv_sdk
 sudo apt-get install build-essential git cmake libasio-dev
