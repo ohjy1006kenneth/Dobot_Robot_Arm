@@ -11,7 +11,7 @@ class PIDLineFollower(Node):
     def __init__(self):
         super().__init__('pid_line_follower')
 
-        self.crack_arrived_prev = False
+        self.crack_trigger_sent = False
 
         # PID parameters
         self.kp = 0.003
@@ -58,12 +58,14 @@ class PIDLineFollower(Node):
             twist.linear.x = 0.0
             twist.angular.z = 0.0
             self.get_logger().warn("No line error received recently — stopping robot.")
-
-            if not self.crack_arrived_prev:
-                self.get_logger().warn("adshglkahgd;lksakgsd")
+        
+            if not self.crack_trigger_sent:
                 self.trigger_pub.publish(Bool(data=True))
-                self.crack_arrived_prev = True
-                return
+                self.get_logger().info("Crack arrived - trigger sent!")
+                self.crack_trigger_sent = True
+            else:
+                pass
+
             return
         else:
             # PID control logic
