@@ -5,6 +5,8 @@ source install/local_setup.bash
 
 sudo -v  # Ask for sudo password once
 
+# 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
+
 export IP_address=192.168.201.1
 export DOBOT_TYPE=cr20
 
