@@ -1,7 +1,7 @@
 #!/bin/bash
 
-source /opt/ros/humble/setup.bash
-source install/local_setup.bash
+source /opt/ros/humble/setup.sh
+source install/local_setup.sh
 
 sudo -v  # Ask for sudo password once
 
