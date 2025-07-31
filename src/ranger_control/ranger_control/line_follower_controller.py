@@ -68,6 +68,7 @@ class PIDLineFollower(Node):
 
             return
         else:
+            self.crack_trigger_sent = False
             # PID control logic
             self.trigger_pub.publish(Bool(data=False))
             error = self.current_error
