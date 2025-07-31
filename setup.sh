@@ -8,6 +8,8 @@ sudo -v  # Ask for sudo password once
 export IP_address=192.168.201.1
 export DOBOT_TYPE=cr20
 
+sudo bash ./src/ranger_ros2/ranger_bringup/scripts/bringup_can2usb.bash 
+
 # gnome-terminal --tab -- bash -c "ros2 launch orbbec_camera femto_mega.launch.py; exec bash"
 # read -p "Started orbbec_camera. Press Enter to continue..."
 

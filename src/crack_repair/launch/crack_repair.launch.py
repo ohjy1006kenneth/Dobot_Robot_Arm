@@ -17,7 +17,7 @@ def generate_launch_description():
     ranger = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                get_package_share_directory('ranger_bringup'), 'launch', 'ranger.launch.xml'
+                get_package_share_directory('ranger_base'), 'launch', 'ranger.launch.py'
             )
         )
     )
