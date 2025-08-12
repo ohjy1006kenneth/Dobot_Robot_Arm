@@ -53,7 +53,7 @@ private:
     {
         // Subscribe to trigger topic
         sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/crack_arrived",
+            "/start_repair",
             10,
             std::bind(&ScriptRunnerNode::trigger_callback, this, std::placeholders::_1));
         timer_->cancel();
