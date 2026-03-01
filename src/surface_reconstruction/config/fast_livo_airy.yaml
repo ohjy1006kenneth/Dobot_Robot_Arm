@@ -1,0 +1,99 @@
+/**:
+  ros__parameters:
+    common:
+      img_topic: ""                        # No camera — img_en: 0, so this is unused
+      lid_topic: "/rslidar_points"         # RoboSense Airy point cloud topic
+      imu_topic: "/rslidar_imu_data_m2"   # Relay output: accel in m/s², gyro in rad/s
+      img_en: 0                            # 0 = LiDAR-Inertial only (no camera)
+      lidar_en: 1
+      ros_driver_bug_fix: false
+
+    extrin_calib:
+      # LiDAR-to-IMU extrinsic: calibrated with lidar_imu_init (rs_airy.launch.py)
+      # Euler (ZYX): roll=-179.050°  pitch=-0.463°  yaw=-91.100°
+      # Time lag IMU to LiDAR: -0.02916 s  (set imu_time_offset below)
+      extrinsic_T: [0.002976, 0.005395, -0.004584]
+      extrinsic_R: [-0.019200, -0.999681,  0.016414,
+                    -0.999783,  0.019064, -0.008392,
+                     0.008076, -0.016571, -0.999830]
+      # Camera-LiDAR extrinsics (Rcl, Pcl) unused when img_en: 0
+      Rcl: [1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0]
+      Pcl: [0.0, 0.0, 0.0]
+
+    time_offset:
+      imu_time_offset: -0.02916         # from lidar_imu_init: Time Lag IMU to LiDAR = -0.02916 s
+      img_time_offset: 0.0              # unused (img_en: 0)
+      exposure_time_init: 0.0           # unused (img_en: 0)
+
+    preprocess:
+      point_filter_num: 1               # Keep every point (increase to 2-3 to reduce CPU load)
+      filter_size_surf: 0.15            # Voxel downsample for surf features (0.05-0.25 indoor, 0.5 outdoor)
+      lidar_type: 7                     # 7 = ROBOSENSE (RS-Airy, 96-line)
+      scan_line: 96                     # RS-Airy has 96 laser rings
+      blind: 0.1                        # Ignore points closer than 0.1 m (filters sensor self-returns)
+
+    vio:
+      # VIO params are largely inactive when img_en: 0, but must be present
+      max_iterations: 5
+      outlier_threshold: 1000
+      img_point_cov: 100
+      patch_size: 8
+      patch_pyrimid_level: 4
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: false       # no camera → no exposure estimation
+      inv_expo_cov: 0.1
+
+    imu:
+      imu_en: true
+      imu_int_frame: 30
+      acc_cov: 0.1                      # Accel process noise
+      gyr_cov: 0.1                      # Gyro process noise
+      b_acc_cov: 0.0001                 # Accel bias random walk
+      b_gyr_cov: 0.0001                 # Gyro bias random walk
+      # Initial bias from lidar_imu_init (informational — FAST-LIVO2 estimates these online):
+      # gyro_bias:  [-0.013486, 0.000704, -0.000208] rad/s
+      # accel_bias: [-0.015877, -0.007494, -0.022533] m/s^2
+
+    lio:
+      max_iterations: 5
+      dept_err: 0.02
+      beam_err: 0.05
+      min_eigen_value: 0.0025
+      voxel_size: 0.5
+      max_layer: 2
+      max_points_num: 50
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:
+      map_sliding_en: true    # Keep only a local window around the sensor — good for object scanning
+      half_map_size: 5        # 5 m radius kept in memory (plenty for object-scale scanning)
+      sliding_thresh: 1.5     # Slide the window when sensor moves >1.5 m from map centre
+
+    uav:
+      imu_rate_odom: false
+      gravity_align_en: true    # MUST be true when IMU is mounted upside-down (roll≈180°)
+                                 # Rotates initial pose so world Z-up matches gravity, fixing the inverted map
+
+    publish:
+      dense_map_en: true
+      pub_effect_point_en: false
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      seq_name: "airy_scan"
+      pose_output_en: false
+
+    pcd_save:
+      pcd_save_en: true
+      type: 0         # 0: World Frame, 1: Body Frame
+      colmap_output_en: false
+      filter_size_pcd: 0.0    # 0.0 = save ALL points (no downsampling) for dense surface reconstruction
+                               # Increase to 0.01–0.05 if file size is too large
+      interval: -1             # -1: accumulate all frames into one PCD file (saved on shutdown)
+      pcd_save_path: "/home/cats/Dobot_Robot_Arm/scans/"  # Output directory (must exist)

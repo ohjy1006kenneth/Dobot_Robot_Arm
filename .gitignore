@@ -2,6 +2,14 @@
 build/
 install/
 log/
+Log/
+
+# === Large data files (scans, development tools) ===
+map/
+maps/
+scan/
+*.pcd
+Development-Linux_x64/
 
 # === Python artifacts ===
 __pycache__/
@@ -15,7 +23,6 @@ __pycache__/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
-Makefile
 
 # === VSCode / JetBrains IDEs ===
 .vscode/
