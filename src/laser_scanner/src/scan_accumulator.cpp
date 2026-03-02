@@ -297,6 +297,20 @@ private:
             x_min, x_max, x_max - x_min,
             y_min, y_max, y_max - y_min);
 
+        // Save individual scan PCD: scan1.pcd, scan2.pcd, ...
+        {
+            std::string individual_path = output_directory_ + "/scan" +
+                                          std::to_string(scan_count_ + 1) + ".pcd";
+            try {
+                pcl::io::savePCDFileBinary(individual_path, *scan_in_fixed);
+                RCLCPP_INFO(this->get_logger(),
+                    "[ACCUMULATOR] Saved individual scan #%d -> %s (%zu pts)",
+                    scan_count_ + 1, individual_path.c_str(), scan_in_fixed->size());
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "Failed to save individual scan: %s", e.what());
+            }
+        }
+
         // 5. First scan -- store directly, no registration needed
         if (scan_count_ == 0 || accumulated_cloud_->empty()) {
             *accumulated_cloud_ += *scan_in_fixed;

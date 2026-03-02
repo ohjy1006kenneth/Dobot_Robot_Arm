@@ -8,7 +8,9 @@ Log/
 map/
 maps/
 scan/
+scans/
 *.pcd
+*.zip
 Development-Linux_x64/
 
 # === Python artifacts ===

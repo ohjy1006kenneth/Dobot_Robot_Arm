@@ -168,10 +168,10 @@ def generate_launch_description():
         # nav2_launch,
         ranger_launch,
         dobot_launch,
-        # static_tf_lidar,
-        # rslidar_node,
+        static_tf_lidar,
+        rslidar_node,
         imu_relay_node,  #
-        # fast_livo_node,
+        fast_livo_node,
         laser_driver,
         scan_accumulator,
         scanning_coordinator,
