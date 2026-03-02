@@ -19,7 +19,7 @@ public:
           // ======== ADJUST THESE VARIABLES AS NEEDED ========
           num_scans_(3),                        // Number of scans to perform
           delay_before_first_scan_(2.4),        // Delay before first scan (seconds)
-          delay_between_scans_(17.3),           // Delay between scans (seconds)
+          delay_between_scans_(13.1),           // Delay between scans (seconds)
           delay_before_save_(2.0),              // Delay before saving (seconds)
           delay_before_clear_(2.0)              // Delay before clearing (seconds)
           // ===================================================

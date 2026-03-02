@@ -20,6 +20,7 @@ constexpr int LASER_LINE_WIDTH = 35;         // Tighter tolerance reduces noise
 // Robot movement parameters
 constexpr double Y_TRAVEL_DISTANCE_MM = 230.0;  // Physical distance scanner moves (mm)
 constexpr double ROBOT_SPEED_M_S = 0.04;          // Robot movement speed (m/s)
+constexpr double Y_RESOLUTION_MM = 0.15;          // Y-axis sampling resolution sent to hardware (mm)
 
 // Working distance guidelines:
 // Close range (<500mm): EXPOSURE=1.0, GAIN=10, THRESHOLD=8, WIDTH=25
@@ -88,13 +89,23 @@ private:
         KSJ3D_SetStartTrigger(0, STS_INPUT_0, 0, TEM_RISING_EDGE);
         KSJ3D_SetDataTriggerMode(0, DTM_INTERNAL);
         KSJ3D_LaserModeSet(0, LM_FLASH);
-        
-        // Calculate optimal scan parameters
-        double robot_speed_mm_s = ROBOT_SPEED_M_S * 1000.0;
-        double scan_duration_s = Y_TRAVEL_DISTANCE_MM / robot_speed_mm_s;
-        int scan_rate_hz = static_cast<int>(TARGET_PROFILES / scan_duration_s);
+
+        // Set Y resolution (controls how far apart profiles are sampled in Y)
+        float fResY;
+        KSJ3D_SetYResolution(0, Y_RESOLUTION_MM);
+        KSJ3D_GetYResolution(0, &fResY);
+
+        // Calculate scan rate and profile count from Y resolution and travel distance
+        // num_profiles = travel_distance / y_resolution
+        // scan_rate    = num_profiles / scan_duration
+        double scan_duration_s = Y_TRAVEL_DISTANCE_MM / (ROBOT_SPEED_M_S * 1000.0);
+        int num_profiles = static_cast<int>(Y_TRAVEL_DISTANCE_MM / fResY);
+        int scan_rate_hz = static_cast<int>(num_profiles / scan_duration_s);
         scan_rate_hz = std::min(scan_rate_hz, MAX_SCAN_RATE_HZ);
-        int num_profiles = static_cast<int>(scan_duration_s * scan_rate_hz);
+        // If rate was capped, recompute profile count so we don't stop early
+        if (scan_rate_hz == MAX_SCAN_RATE_HZ) {
+            num_profiles = static_cast<int>(scan_duration_s * scan_rate_hz);
+        }
         
         KSJ3D_SetDataTriggerInternalFrequency(0, scan_rate_hz);
         KSJ3D_SetMaxNumberOfProfilesToCapture(0, num_profiles);
@@ -107,9 +118,16 @@ private:
         KSJ3D_SetUniformXResolution(0, fMin);  // Use minimum value for MAXIMUM X resolution
         KSJ3D_GetUniformXResolution(0, &g_fXStart, &g_fXRes, &g_nUniformWidth);
 
+        float x_width_mm = g_nUniformWidth * g_fXRes;
+        RCLCPP_INFO(this->get_logger(), "[SCANNER] Scan dimensions:");
+        RCLCPP_INFO(this->get_logger(), "  X (width):  %.1f mm  (%d pts @ %.4f mm/pt, start=%.2f mm)",
+                    x_width_mm, g_nUniformWidth, g_fXRes, g_fXStart);
+        RCLCPP_INFO(this->get_logger(), "  Y (travel): %.1f mm  (%d profiles @ %.4f mm/profile)",
+                    Y_TRAVEL_DISTANCE_MM, num_profiles, (double)Y_TRAVEL_DISTANCE_MM / num_profiles);
+
         // Register callback
         KSJ3D_RegisterZIDataCB(0, &KsjDriverNode::ZICallbackStatic, this);
-        
+
         RCLCPP_INFO(this->get_logger(), "[SCANNER] Ready - %dHz, %d profiles, %.1fs scan time", 
                     scan_rate_hz, num_profiles, scan_duration_s);
     }
@@ -126,6 +144,7 @@ private:
 
         scan_received_ = false;
         scanning_ = true;
+        scan_start_time_ = this->now();  // record when arm started moving
 
         int ret = KSJ3D_StartAcquisition(0);
         if (ret != 0) {
@@ -165,8 +184,22 @@ private:
 
     void ZICallback(int nWidth, int nHeight, float* z, float fYRes, unsigned char* intensity)
     {
-        // Y spacing based on actual travel distance
-        double y_spacing_m = (Y_TRAVEL_DISTANCE_MM / 1000.0) / std::max(1, nHeight);
+        // fYRes is the actual hardware-measured Y spacing in mm — convert to metres
+        double y_spacing_m = fYRes / 1000.0;
+
+        // Physical geometry:
+        //   scanner X (nWidth pts)       = horizontal laser line    → laser_frame x
+        //   scanner Y (nHeight profiles) = arm travel during scan   → laser_frame y
+        //   scanner Z (depth, mm)        = downward toward ground   → laser_frame z
+        //
+        // The message timestamp is set to scan_start_time_ (when the arm began moving
+        // for this strip).  This means the TF from laser_frame→base_link is looked up
+        // at the arm's START position for this strip, which is a well-defined, consistent
+        // reference point across all strips.
+        //
+        // Profile j=0 corresponds to the arm's start position (TF origin), so
+        // y_coords[j] = j * y_spacing_m  (no centering, no negation needed).
+        // After the URDF transform the arm-travel direction maps into the world correctly.
         
         // Calculate statistics while processing
         int valid_count = 0;
@@ -181,8 +214,8 @@ private:
         for (int j = 0; j < nHeight; ++j) {
             for (int i = 0; i < nWidth; i++) {
                 int idx = j * nWidth + i;
-                x_coords[idx] = (g_fXStart + i * g_fXRes) / 1000.0f;
-                y_coords[idx] = j * y_spacing_m;
+                x_coords[idx] = (g_fXStart + i * g_fXRes) / 1000.0f;   // laser line → laser_frame x
+                y_coords[idx] = static_cast<float>(-(j * y_spacing_m)); // arm travel → laser_frame y (negated for Rx(pi))
                 
                 float z_val = z[idx];
                 
@@ -203,11 +236,19 @@ private:
         
         RCLCPP_INFO(this->get_logger(), "[SCANNER] Captured: %.1f%% valid (%d/%d pts)", 
                     valid_percentage, valid_count, total_points);
+        if (valid_count > 0) {
+            RCLCPP_INFO(this->get_logger(), "[SCANNER] Z range: %.2f mm to %.2f mm (span=%.2f mm)",
+                        min_z, max_z, max_z - min_z);
+        }
 
         // Create PointCloud2 message - UNORGANIZED cloud (height=1) with only valid points
         auto msg = sensor_msgs::msg::PointCloud2();
         msg.header.frame_id = "laser_frame";
-        msg.header.stamp = this->get_clock()->now();
+        // Timestamp = scan start time: the arm was at its start position (TF origin)
+        // when this scan began.  Using start time (not midpoint) ensures the TF lookup
+        // captures a consistent, well-defined arm position for every strip — unaffected
+        // by the diagonal transit the arm makes between strip end and next strip start.
+        msg.header.stamp = scan_start_time_;
         msg.height = 1;  // Unorganized cloud
         msg.width = valid_count;  // Only valid points
         msg.is_dense = true;  // No NaN/Inf values
@@ -257,6 +298,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr scan_service_;
     bool scanning_;
     bool scan_received_;
+    rclcpp::Time scan_start_time_;  // time when arm started moving (used as cloud timestamp for TF lookup)
 };
 
 int main(int argc, char* argv[])

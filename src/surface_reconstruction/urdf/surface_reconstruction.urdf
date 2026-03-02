@@ -432,4 +432,43 @@
     <parent link="Link6" />
     <child link="rslidar" />
   </joint>
+
+  <link name="laser_frame">
+    <visual>
+      <geometry>
+        <box size="0.05 0.05 0.04" />
+      </geometry>
+      <material name="green">
+        <color rgba="0 1 0 1" />
+      </material>
+    </visual>
+  </link>
+
+  <joint name="dobot_to_laser" type="fixed">
+    <!--
+      KSJ UC3D scanner coordinate convention (in laser_frame):
+        X  = horizontal laser line (3582 pts, 1516mm)
+        Y  = arm travel direction  (1533 profiles, 230mm)
+        Z  = depth from scanner head (positive = away from scanner, downward toward ground)
+
+      CONFIRMED from log data (X/Y spans in base_link after TF):
+        world X span ~0.285m = arm travel (230mm)   → laser_frame X drives world X
+        world Y span ~1.36m  = laser line (1516mm)  → laser_frame Y drives world Y
+        So the URDF rotation maps: laser_frame X → world X, laser_frame Y → world Y
+
+      In laser_driver.cpp we therefore assign:
+        laser_frame x = scanner Y (arm travel, j * y_spacing)   → world X
+        laser_frame y = scanner X (laser line, i * x_res)       → world Y (negated by Rx(pi))
+
+      URDF rpy = "pi 0 -2*pi/3" achieves:
+        Rx(pi): flips laser_frame Y and Z signs
+        Rz(-2pi/3): handles the physical mounting rotation of the scanner
+
+      Measure the actual XYZ offset from Link6 flange to the scanner emission point
+      and replace xyz="0 0 0.05" with the real values.
+    -->
+    <origin xyz="0 0 0.05" rpy="3.1415927 0 2.0944" />
+    <parent link="Link6" />
+    <child link="laser_frame" />
+  </joint>
 </robot>

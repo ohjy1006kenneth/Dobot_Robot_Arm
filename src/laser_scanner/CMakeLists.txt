@@ -18,11 +18,18 @@ find_package(PCL REQUIRED COMPONENTS common io registration filters)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 include_directories(
   include
   ${PCL_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIR}
 )
+
+# small_gicp (header-only traits + built shared lib)
+set(SMALL_GICP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../small_gicp")
+include_directories(${SMALL_GICP_DIR}/include)
 
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
@@ -52,10 +59,14 @@ ament_target_dependencies(scan_accumulator
     std_srvs
     geometry_msgs
     tf2_ros
-    tf2_sensor_msgs
+    tf2_eigen
     pcl_conversions
 )
-target_link_libraries(scan_accumulator ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
+target_link_libraries(scan_accumulator
+    ${PCL_LIBRARIES}
+    OpenMP::OpenMP_CXX
+    ${SMALL_GICP_DIR}/../../build/small_gicp/libsmall_gicp.so
+)
 
 add_executable(scanning_coordinator src/scanning_coordinator.cpp)
 ament_target_dependencies(scanning_coordinator 
@@ -67,7 +78,6 @@ ament_target_dependencies(scanning_coordinator
 
 target_include_directories(laser_driver PRIVATE ${PCL_INCLUDE_DIRS} ${KSJ3D_INCLUDE_DIR})
 target_include_directories(scan_accumulator PRIVATE ${PCL_INCLUDE_DIRS})
-target_link_libraries(scan_accumulator ${PCL_LIBRARIES})
 
 set(KSJ_LIB ${PROJECT_SOURCE_DIR}/include/KSJApi.bin/x64/libKSJApi3D.so)
 

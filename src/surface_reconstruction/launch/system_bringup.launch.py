@@ -113,20 +113,6 @@ def generate_launch_description():
         }]
     )
 
-    # FAST-LIO Node (kept for fallback — swap fast_livo_node <-> fast_lio_node in LaunchDescription)
-    fastlio_config_dir = os.path.join(pkg_bringup, 'config')
-    fastlio_config_file = 'fast_lio.yaml'
-    fast_lio_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory('fast_lio'), 'launch', 'mapping.launch.py')
-        ),
-        launch_arguments={
-            'config_path': fastlio_config_dir,
-            'config_file': fastlio_config_file,
-            'rviz': 'true'
-        }.items()
-    )
-
     # FAST-LIVO2 Node (LiDAR-Inertial only, img_en: 0)
     fast_livo_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -149,15 +135,44 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Laser scanner driver node (KSJ hardware)
+    laser_driver = Node(
+        package='laser_scanner',
+        executable='laser_driver',
+        name='laser_driver',
+        output='screen',
+        emulate_tty=True,
+    )
+
+    # Scan accumulator: GICP + robot arm TF for pose
+    scan_accumulator = Node(
+        package='laser_scanner',
+        executable='scan_accumulator',
+        name='scan_accumulator',
+        output='screen',
+        emulate_tty=True,
+    )
+
+    # Scanning coordinator: orchestrates trigger → save → clear sequence
+    scanning_coordinator = Node(
+        package='laser_scanner',
+        executable='scanning_coordinator',
+        name='scanning_coordinator',
+        output='screen',
+        emulate_tty=True,
+    )
+
     return LaunchDescription([
-        # robot_state_publisher,
+        robot_state_publisher,
         # pc_to_laserscan,
         # nav2_launch,
-        # ranger_launch,
-        # dobot_launch,
-        static_tf_lidar,
-        rslidar_node,
-        imu_relay_node,  # Required: accel must be in m/s² (not g-force)
-        # fast_lio_node,   # Fallback: uncomment to switch back to FAST-LIO
-        fast_livo_node,
+        ranger_launch,
+        dobot_launch,
+        # static_tf_lidar,
+        # rslidar_node,
+        imu_relay_node,  #
+        # fast_livo_node,
+        laser_driver,
+        scan_accumulator,
+        scanning_coordinator,
     ])
