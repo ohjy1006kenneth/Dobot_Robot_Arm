@@ -42,11 +42,15 @@ Optional flags:
 
 import argparse
 import struct
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 from scipy.spatial import KDTree
 from scipy.linalg import svd
+
+N_JOBS = multiprocessing.cpu_count()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -140,16 +144,21 @@ def save_pcd(path: str, xyz: np.ndarray, extra: dict, orig_hdr: dict):
     types  = orig_hdr['type']
     counts = orig_hdr.get('count', [1] * len(fields))
 
-    cols, fmt_parts = [], []
+    # Build structured array for binary output
+    dt_list = []
+    for name, tp, sz, cnt in zip(fields, types, sizes, counts):
+        np_type = _PCD_TYPE_MAP.get((tp, sz), np.float32)
+        dt_list.append((name, np_type) if cnt == 1 else (name, np_type, (cnt,)))
+    dtype = np.dtype(dt_list)
+    arr = np.zeros(n, dtype=dtype)
+
     for name, tp, sz in zip(fields, types, sizes):
-        if   name == 'x': cols.append(xyz[:, 0])
-        elif name == 'y': cols.append(xyz[:, 1])
-        elif name == 'z': cols.append(xyz[:, 2])
+        np_type = _PCD_TYPE_MAP.get((tp, sz), np.float32)
+        if   name == 'x': arr['x'] = xyz[:, 0].astype(np_type)
+        elif name == 'y': arr['y'] = xyz[:, 1].astype(np_type)
+        elif name == 'z': arr['z'] = xyz[:, 2].astype(np_type)
         elif name in extra:
-            cols.append(extra[name].astype(np.float64 if tp == 'F' else np.int64))
-        else:
-            cols.append(np.zeros(n))
-        fmt_parts.append('%.6f' if tp == 'F' else '%d')
+            arr[name] = extra[name].astype(np_type)
 
     header_lines = [
         'VERSION 0.7',
@@ -159,12 +168,12 @@ def save_pcd(path: str, xyz: np.ndarray, extra: dict, orig_hdr: dict):
         f'COUNT {" ".join(map(str, counts))}',
         f'WIDTH {n}', 'HEIGHT 1',
         'VIEWPOINT 0 0 0 1 0 0 0',
-        f'POINTS {n}', 'DATA ascii',
+        f'POINTS {n}', 'DATA binary',
     ]
-    with open(path, 'w') as f:
-        f.write('\n'.join(header_lines) + '\n')
-        np.savetxt(f, np.column_stack(cols), fmt=fmt_parts)
-    print(f"  Saved  {n:,} points  ->  {path}")
+    with open(path, 'wb') as f:
+        f.write(('\n'.join(header_lines) + '\n').encode('utf-8'))
+        f.write(arr.tobytes())
+    print(f"  Saved  {n:,} points  ->  {path}  (binary)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -219,31 +228,39 @@ def voxel_downsample(pts, voxel_size):
 #  Normal + covariance estimation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def estimate_normals(pts, k=20):
-    k    = min(k, len(pts) - 1)
-    tree = KDTree(pts)
-    _, idx = tree.query(pts, k=k)
-    normals = np.zeros_like(pts)
-    for i, nbrs in enumerate(idx):
-        nb   = pts[nbrs]
-        diff = nb - nb.mean(axis=0)
-        cov  = (diff.T @ diff) / max(k - 1, 1)
-        vals, vecs = np.linalg.eigh(cov)
-        normals[i] = vecs[:, 0]
-    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+def _compute_normals_chunk(pts, idx_chunk):
+    nb   = pts[idx_chunk]
+    diff = nb - nb.mean(axis=1, keepdims=True)
+    covs = np.einsum('nki,nkj->nij', diff, diff) / max(idx_chunk.shape[1] - 1, 1)
+    _, vecs = np.linalg.eigh(covs)
+    normals = vecs[:, :, 0]
+    norms   = np.linalg.norm(normals, axis=1, keepdims=True)
     return normals / np.where(norms < 1e-10, 1.0, norms)
 
 
+def _compute_covs_chunk(pts, idx_chunk):
+    nb   = pts[idx_chunk]
+    diff = nb - nb.mean(axis=1, keepdims=True)
+    return np.einsum('nki,nkj->nij', diff, diff) / max(idx_chunk.shape[1] - 1, 1)
+
+
+def estimate_normals(pts, k=20):
+    k      = min(k, len(pts) - 1)
+    _, idx = KDTree(pts).query(pts, k=k, workers=-1)
+    chunks = np.array_split(idx, N_JOBS)
+    with ThreadPoolExecutor(max_workers=N_JOBS) as ex:
+        results = list(ex.map(lambda c: _compute_normals_chunk(pts, c), chunks))
+    return np.vstack(results)
+
+
 def estimate_covariances(pts, k=20):
-    k    = min(k, len(pts) - 1)
-    tree = KDTree(pts)
-    _, idx = tree.query(pts, k=k)
-    covs = np.zeros((len(pts), 3, 3))
-    for i, nbrs in enumerate(idx):
-        nb   = pts[nbrs]
-        diff = nb - nb.mean(axis=0)
-        covs[i] = (diff.T @ diff) / max(k - 1, 1)
-    return covs
+    k      = min(k, len(pts) - 1)
+    _, idx = KDTree(pts).query(pts, k=k, workers=-1)
+    chunks = np.array_split(idx, N_JOBS)
+    with ThreadPoolExecutor(max_workers=N_JOBS) as ex:
+        results = list(ex.map(lambda c: _compute_covs_chunk(pts, c), chunks))
+    return np.vstack(results)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -297,28 +314,38 @@ def gicp_step_p2plane(src, tgt, src_covs, tgt_covs,
     if mask.sum() < 6:
         return np.eye(4)
 
-    src_m   = src[mask]
-    tgt_m   = tgt[idx[mask]]
-    normals = tgt_normals[idx[mask]]
-    Cs      = src_covs[mask]
-    Ct      = tgt_covs[idx[mask]]
+    src_m   = src[mask]                    # (M, 3)
+    tgt_m   = tgt[idx[mask]]              # (M, 3)
+    normals = tgt_normals[idx[mask]]       # (M, 3)
+    Cs      = src_covs[mask]              # (M, 3, 3)
+    Ct      = tgt_covs[idx[mask]]         # (M, 3, 3)
 
-    H, b = np.zeros((6, 6)), np.zeros(6)
-    for i in range(len(src_m)):
-        n   = normals[i]
-        d   = float(n @ (tgt_m[i] - src_m[i]))
-        C   = Ct[i] + Cs[i]
-        w   = 1.0 / (float(n @ C @ n) + 1e-6)
-        p   = src_m[i]
-        J   = np.zeros(6)
-        J[:3] = n @ np.array([
-            [    0,  p[2], -p[1]],
-            [-p[2],     0,  p[0]],
-            [ p[1], -p[0],     0],
-        ])
-        J[3:] = n
-        H += w * np.outer(J, J)
-        b += w * d * J
+    # ── Vectorized Jacobian ───────────────────────────────────────────────────
+    # J[:, :3] = n @ skew(p),  J[:, 3:] = n
+    # skew(p) = [[0, pz, -py], [-pz, 0, px], [py, -px, 0]]
+    px, py, pz = src_m[:,0], src_m[:,1], src_m[:,2]
+    zeros = np.zeros(len(src_m))
+    # skew rows dotted with normal: n @ skew(p) = (M,3) x batched
+    # Result shape (M, 3) for rotation part
+    J_rot = np.stack([
+         normals[:,1]*pz - normals[:,2]*py,   # n·skew col 0
+        -normals[:,0]*pz + normals[:,2]*px,   # n·skew col 1
+         normals[:,0]*py - normals[:,1]*px,   # n·skew col 2
+    ], axis=1)                                # (M, 3)
+    J = np.concatenate([J_rot, normals], axis=1)  # (M, 6)
+
+    # ── Vectorized weights ────────────────────────────────────────────────────
+    C    = Ct + Cs                                          # (M, 3, 3)
+    nCn  = np.einsum('mi,mij,mj->m', normals, C, normals)  # (M,)
+    w    = 1.0 / (nCn + 1e-6)                              # (M,)
+
+    # ── Vectorized residuals ──────────────────────────────────────────────────
+    d = np.einsum('mi,mi->m', normals, tgt_m - src_m)      # (M,)
+
+    # ── Accumulate H and b ───────────────────────────────────────────────────
+    wJ = w[:, None] * J                    # (M, 6)
+    H  = J.T @ wJ                          # (6, 6)
+    b  = wJ.T @ d                          # (6,)
 
     try:    xi = np.linalg.solve(H + 1e-6 * np.eye(6), b)
     except: return np.eye(4)
@@ -442,6 +469,8 @@ def align_pair(src_xyz, tgt_xyz, label,
                n_stages, k_covs, max_iter, overlap_frac):
     print(f"\n-- Aligning {label} " + "-" * max(0, 50 - len(label)))
 
+    # src_xyz has already been pre-offset to its expected grid position,
+    # so overlap trimming works correctly here.
     print("    Step 1 - trimming to overlap region ...")
     src_edge, tgt_edge, _ = trim_to_overlap(src_xyz, tgt_xyz,
                                              overlap_frac=overlap_frac)
@@ -449,9 +478,22 @@ def align_pair(src_xyz, tgt_xyz, label,
     print("    Step 2 - PCA initial alignment ...")
     T = pca_init_transform(src_edge, tgt_edge)
 
+    # ── Pre-flight check ──────────────────────────────────────────────────────
+    coarsest_corr = finest_corr_dist * 2**(n_stages-1)
+    src_hinted    = apply_transform(
+        voxel_downsample(src_edge, finest_voxel * 2**(n_stages-1)), T)
+    tgt_check     = voxel_downsample(tgt_edge, finest_voxel * 2**(n_stages-1))
+    mean_nn       = KDTree(tgt_check).query(src_hinted, k=1, workers=-1)[0].mean()
+    print(f"    Pre-flight mean-NN after hint: {mean_nn:.5f}m  "
+          f"(coarsest corr_dist={coarsest_corr:.5f}m)")
+    if mean_nn > coarsest_corr * 2:
+        print(f"    !! mean-NN ({mean_nn:.4f}m) > 2x coarsest corr_dist — "
+              f"try increasing --max-corr-dist or check --offset-x/y values")
+
     scales = [(finest_voxel * 2**i, finest_corr_dist * 2**i)
               for i in range(n_stages - 1, -1, -1)]
 
+    consecutive_zero = 0
     for stage_idx, (vox, corr) in enumerate(scales):
         print(f"    Stage {stage_idx+1}/{n_stages}  "
               f"voxel={vox:.5f}m  corr_dist={corr:.5f}m ...")
@@ -461,8 +503,15 @@ def align_pair(src_xyz, tgt_xyz, label,
             max_iter=max_iter, max_corr_dist=corr,
         )
         print(f"      fitness={fitness:.4f}  RMSE={rmse:.6f}m")
-        if fitness < 0.10:
-            print("      !! Low fitness — try --overlap 0.70")
+
+        if fitness == 0.0:
+            consecutive_zero += 1
+            print(f"      !! Zero fitness — try --max-corr-dist {corr*2:.3f}")
+            if consecutive_zero >= 2:
+                print("      !! Aborting — check --offset-x/y or increase --max-corr-dist")
+                break
+        else:
+            consecutive_zero = 0
 
     return T
 
@@ -565,6 +614,19 @@ def main():
     parser.add_argument("--sor",           action="store_true")
     parser.add_argument("--sor-k",         type=int,   default=20)
     parser.add_argument("--sor-std",       type=float, default=1.0)
+    # ── Per-block offsets (from pick_offset.py) ───────────────────────────────
+    parser.add_argument("--off2-x", type=float, default=+0.131,
+                        help="X offset to apply to block2 (default +0.131)")
+    parser.add_argument("--off2-y", type=float, default=-0.032,
+                        help="Y offset to apply to block2 (default -0.032)")
+    parser.add_argument("--off2-z", type=float, default=+0.020,
+                        help="Z offset to apply to block2 (default +0.020)")
+    parser.add_argument("--off3-x", type=float, default=-0.050,
+                        help="X offset to apply to block3 (default -0.050)")
+    parser.add_argument("--off3-y", type=float, default=+1.591,
+                        help="Y offset to apply to block3 (default +1.591)")
+    parser.add_argument("--off3-z", type=float, default=+0.012,
+                        help="Z offset to apply to block3 (default +0.012)")
     args = parser.parse_args()
 
     # ── Load ──────────────────────────────────────────────────────────────────
@@ -598,18 +660,38 @@ def main():
         overlap_frac     = args.overlap,
     )
 
-    # ── Step 1: block2 -> block1  (vertical, ~60cm) ───────────────────────────
-    T2 = align_pair(xyz2, xyz1, "block2 -> block1", **kw)
-    xyz2_aligned = apply_transform(xyz2, T2)
+    print(f"\n-- Pre-positioning blocks using measured offsets -------------------")
+    print(f"   block2: dX={args.off2_x:+.4f}  dY={args.off2_y:+.4f}  dZ={args.off2_z:+.4f}")
+    print(f"   block3: dX={args.off3_x:+.4f}  dY={args.off3_y:+.4f}  dZ={args.off3_z:+.4f}")
+    print(f"   block4: dX={args.off3_x:+.4f}  dY={args.off2_y+args.off3_y:+.4f}  dZ={args.off3_z:+.4f}  (block3 offset + block2 Y)")
 
-    # ── Step 2: block3 -> block1  (horizontal, ~1m) ───────────────────────────
-    T3 = align_pair(xyz3, xyz1, "block3 -> block1", **kw)
-    xyz3_aligned = apply_transform(xyz3, T3)
+    def pre_offset(xyz, dx, dy, dz):
+        out = xyz.copy()
+        out[:, 0] += dx
+        out[:, 1] += dy
+        out[:, 2] += dz
+        return out
 
-    # ── Step 3: block4 -> block3  (vertical, ~60cm) ───────────────────────────
-    # Align against already-aligned block3 (its direct neighbour)
-    T4 = align_pair(xyz4, xyz3_aligned, "block4 -> block3 (aligned)", **kw)
-    xyz4_aligned = apply_transform(xyz4, T4)
+    xyz2_pre = pre_offset(xyz2, args.off2_x, args.off2_y, args.off2_z)
+    xyz3_pre = pre_offset(xyz3, args.off3_x, args.off3_y, args.off3_z)
+    # block4 is below block3, so it gets block3's X/Z offset + block2's Y offset
+    xyz4_pre = pre_offset(xyz4, args.off3_x, args.off2_y + args.off3_y, args.off3_z)
+
+    # ── Step 1: block2 -> block1 ──────────────────────────────────────────────
+    T2 = align_pair(xyz2_pre, xyz1, "block2 -> block1", **kw)
+    xyz2_aligned = apply_transform(xyz2_pre, T2)
+    step1_xyz, step1_extra = merge_clouds([(xyz1, extra1), (xyz2_aligned, extra2)])
+    save_pcd("debug_step1_b1b2.pcd", step1_xyz, step1_extra, hdr1)
+
+    # ── Step 2: block3 -> block1 ──────────────────────────────────────────────
+    T3 = align_pair(xyz3_pre, xyz1, "block3 -> block1", **kw)
+    xyz3_aligned = apply_transform(xyz3_pre, T3)
+    step2_xyz, step2_extra = merge_clouds([(xyz1, extra1), (xyz2_aligned, extra2), (xyz3_aligned, extra3)])
+    save_pcd("debug_step2_b1b2b3.pcd", step2_xyz, step2_extra, hdr1)
+
+    # ── Step 3: block4 -> block3 ──────────────────────────────────────────────
+    T4 = align_pair(xyz4_pre, xyz3_aligned, "block4 -> block3 (aligned)", **kw)
+    xyz4_aligned = apply_transform(xyz4_pre, T4)
 
     # ── Merge all four ────────────────────────────────────────────────────────
     print("\n-- Merging all four blocks -----------------------------------------")
