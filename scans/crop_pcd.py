@@ -11,17 +11,17 @@ Just edit the CONFIG block below and run:  python3 crop_pcd.py
 INPUT_FILE  = "all_raw_points.pcd"   # Input PCD file
 OUTPUT_FILE = "cropped.pcd"          # Output PCD file (None = auto: input_cropped.pcd)
 
-RADIUS      = 2.5        # Keep points within this XY radius in metres (None = no radius crop)
-ABOVE       = 0.0        # Keep points above this height relative to floor in metres
+RADIUS      = 3.0       # Keep points within this XY radius in metres (None = no radius crop)
+ABOVE       = 0.05       # Keep points above this height relative to floor in metres
                          #   0.0  = everything above the floor surface
                          #   0.05 = everything above 5 cm (removes the floor itself)
                          #   None = no lower height limit
-BELOW       = 2.20       # Keep points below this height relative to floor in metres
+BELOW       = 0.1       # Keep points below this height relative to floor in metres
                          #   0.20 = up to 20 cm above floor
                          #   None = no upper height limit
 FLOOR_Z     = None       # Override floor Z in metres absolute (None = auto-detect from 2nd percentile)
 
-BOX         = None       # XYZ bounding box as [xmin, xmax, ymin, ymax, zmin, zmax]
+BOX = None     # XYZ bounding box as [xmin, xmax, ymin, ymax, zmin, zmax]
                          #   e.g. [-1, 1, -1, 1, -0.5, 1.5 ]
                          #   None = no box crop
 
