@@ -48,10 +48,13 @@ def generate_launch_description():
         parameters=[{
             'target_frame': 'rslidar',
             'transform_tolerance': 0.2,
-            'min_height': -0.5,
-            'max_height': 1.0,
-            'angle_min': -1.5708,
-            'angle_max': 1.5708,
+            # Tight Z slice to avoid floor/ceiling/robot body hits.
+            # If the LiDAR is upside down, adjust these signs after checking the pointcloud Z axis.
+            'min_height': -0.10,
+            'max_height': 0.10,
+            # Use full 360deg scan unless you intentionally only want a front-facing scan.
+            'angle_min': -3.14159,
+            'angle_max': 3.14159,
             'use_inf': True,
             'range_min': 0.15,
             'use_sim_time': False,
