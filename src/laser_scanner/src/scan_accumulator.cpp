@@ -33,13 +33,13 @@ static const int    AUTO_PUBLISH_INTERVAL_MS = 1000;
 
 // GICP — run on structure-only subset (non-floor points) so the solver
 // locks onto real 3D geometry rather than featureless flat floor.
-static const double GICP_MAX_CORRESPONDENCE_DISTANCE = 0.10;  // 100 mm — wide enough for 55% overlapping strips
+static const double GICP_MAX_CORRESPONDENCE_DISTANCE = 0.25;  // 250 mm overlapping strips
 static const int    GICP_MAX_ITERATIONS              = 200;
 static const double GICP_DOWNSAMPLING_RESOLUTION     = 0.005; // 5 mm voxel (more points survive)
 static const int    GICP_NUM_THREADS                 = 4;
 static const int    GICP_NUM_NEIGHBORS               = 20;
 
-// Floor filtering for GICP input.
+// Floor filtering for GICP input
 // Points whose Z (in base_link) is within FLOOR_BAND_M of the detected
 // floor level are excluded from registration.  Full-resolution merged
 // cloud always keeps all points.
@@ -86,7 +86,7 @@ static pcl::PointCloud<pcl::PointXYZI>::Ptr removeFloor(
 class ScanAccumulatorNode : public rclcpp::Node
 {
 public:
-    ScanAccumulatorNode() : Node("scan_accumulator"), scan_count_(0)
+    ScanAccumulatorNode() : Node("scan_accumulator"), scan_count_(0), block_scan_count_(0)
     {
         tf_buffer_   = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -117,6 +117,7 @@ public:
         this->declare_parameter("fixed_frame", "base_link");
         this->declare_parameter("output_directory",
                                 std::string(getenv("HOME")) + "/Dobot_Robot_Arm/scans");
+        this->declare_parameter("position_prefix", std::string("pos1"));  // change between car positions
         this->declare_parameter("auto_publish_interval_ms", AUTO_PUBLISH_INTERVAL_MS);
         this->declare_parameter("gicp_max_correspondence_distance", GICP_MAX_CORRESPONDENCE_DISTANCE);
         this->declare_parameter("gicp_max_iterations",              GICP_MAX_ITERATIONS);
@@ -124,8 +125,9 @@ public:
         this->declare_parameter("gicp_num_threads",                 GICP_NUM_THREADS);
         this->declare_parameter("floor_band_m",                     FLOOR_BAND_M);
 
-        fixed_frame_      = this->get_parameter("fixed_frame").as_string();
-        output_directory_ = this->get_parameter("output_directory").as_string();
+        fixed_frame_       = this->get_parameter("fixed_frame").as_string();
+        output_directory_  = this->get_parameter("output_directory").as_string();
+        position_prefix_   = this->get_parameter("position_prefix").as_string();
         gicp_max_corr_    = this->get_parameter("gicp_max_correspondence_distance").as_double();
         gicp_max_iter_    = this->get_parameter("gicp_max_iterations").as_int();
         gicp_downsample_  = this->get_parameter("gicp_downsampling_resolution").as_double();
@@ -151,9 +153,9 @@ public:
         prev_tf_translation_  = Eigen::Vector3d::Zero();
 
         RCLCPP_INFO(this->get_logger(),
-            "[ACCUMULATOR] Ready — structure-GICP + TF, fixed_frame=%s, "
+            "[ACCUMULATOR] Ready — structure-GICP + TF, fixed_frame=%s, prefix=%s, "
             "corr=%.3fm, floor_band=+-%.1fmm",
-            fixed_frame_.c_str(), gicp_max_corr_, floor_band_ * 1000.0);
+            fixed_frame_.c_str(), position_prefix_.c_str(), gicp_max_corr_, floor_band_ * 1000.0);
     }
 
 private:
@@ -188,7 +190,8 @@ private:
 
             pcl::PointXYZI pt;
             pt.x = x;  pt.y = y;  pt.z = z;
-            pt.intensity = (i_off >= 0) ? static_cast<float>(ptr[i_off]) : 0.0f;
+            float intensity = (i_off >= 0) ? *reinterpret_cast<const float*>(ptr + i_off) : 0.0f;
+            pt.intensity = intensity;
             cloud->points.push_back(pt);
         }
         cloud->width  = cloud->points.size();
@@ -235,7 +238,7 @@ private:
     {
         std::lock_guard<std::mutex> lock(cloud_mutex_);
 
-        // 1. Parse
+        // 1. Parse PointCloud2 -> pcl::PointXYZI
         auto scan_pcl = msgToPcl(msg);
         if (scan_pcl->empty()) {
             RCLCPP_WARN(this->get_logger(), "Empty scan -- skipping");
@@ -259,9 +262,8 @@ private:
         Eigen::Matrix4f tf_matrix = tf_pose.matrix().cast<float>();
 
         // 3. Transform entire scan into base_link frame
-        pcl::PointCloud<pcl::PointXYZI>::Ptr scan_in_fixed(
-            new pcl::PointCloud<pcl::PointXYZI>);
-        pcl::transformPointCloud(*scan_pcl, *scan_in_fixed, tf_matrix);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr scan_in_fixed(new pcl::PointCloud<pcl::PointXYZI>);
+        pcl::transformPointCloud<pcl::PointXYZI>(*scan_pcl, *scan_in_fixed, tf_matrix);
 
         // 4. Detect floor Z from first scan and reuse for all subsequent scans.
         float floor_z;
@@ -297,18 +299,23 @@ private:
             x_min, x_max, x_max - x_min,
             y_min, y_max, y_max - y_min);
 
-        // Save individual scan PCD: scan1.pcd, scan2.pcd, ...
-        {
-            std::string individual_path = output_directory_ + "/scan" +
-                                          std::to_string(scan_count_ + 1) + ".pcd";
-            try {
-                pcl::io::savePCDFileBinary(individual_path, *scan_in_fixed);
-                RCLCPP_INFO(this->get_logger(),
-                    "[ACCUMULATOR] Saved individual scan #%d -> %s (%zu pts)",
-                    scan_count_ + 1, individual_path.c_str(), scan_in_fixed->size());
-            } catch (const std::exception& e) {
-                RCLCPP_ERROR(this->get_logger(), "Failed to save individual scan: %s", e.what());
-            }
+        // Save individual scan PCD: blockN/blockN_scanM.pcd
+        int block_num = scan_count_ / 3 + 1;
+        int scan_num  = block_scan_count_ + 1;
+        std::string block_folder = output_directory_ + "/block" + std::to_string(block_num);
+        try {
+            fs::create_directories(block_folder);
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to create block folder: %s", e.what());
+        }
+        std::string individual_path = block_folder + "/block" + std::to_string(block_num) + "_scan" + std::to_string(scan_num) + ".pcd";
+        try {
+            pcl::io::savePCDFileBinary(individual_path, *scan_in_fixed);
+            RCLCPP_INFO(this->get_logger(),
+                "[ACCUMULATOR] Saved individual scan #%d -> %s (%zu pts)",
+                scan_num, individual_path.c_str(), scan_in_fixed->size());
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to save individual scan: %s", e.what());
         }
 
         // 5. First scan -- store directly, no registration needed
@@ -316,6 +323,7 @@ private:
             *accumulated_cloud_ += *scan_in_fixed;
             prev_tf_translation_ = tf_t;
             scan_count_++;
+            block_scan_count_++;
             RCLCPP_INFO(this->get_logger(),
                 "[ACCUMULATOR] Scan #1 stored (TF %s) -> Total: %zu pts",
                 have_tf ? "OK" : "IDENTITY-FALLBACK",
@@ -339,6 +347,7 @@ private:
             *accumulated_cloud_ += *scan_in_fixed;
             prev_tf_translation_ = tf_t;
             scan_count_++;
+            block_scan_count_++;
             RCLCPP_WARN(this->get_logger(),
                 "[ACCUMULATOR] Scan #%d: too few structure pts -- TF-only -> Total: %zu pts",
                 scan_count_, accumulated_cloud_->size());
@@ -373,15 +382,15 @@ private:
         double dr_deg = aa.angle() * 180.0 / M_PI;
 
         // Allow up to 150mm / 10deg correction on top of TF placement
-        constexpr double MAX_GICP_TRANSLATION_M = 0.15;
-        constexpr double MAX_GICP_ROTATION_DEG  = 10.0;
+        constexpr double MAX_GICP_TRANSLATION_M = 0.08;
+        constexpr double MAX_GICP_ROTATION_DEG  = 5.0;
 
         if (result.converged && result.iterations > 0 &&
             dt_m < MAX_GICP_TRANSLATION_M && dr_deg < MAX_GICP_ROTATION_DEG)
         {
             Eigen::Matrix4f correction = result.T_target_source.matrix().cast<float>();
             pcl::PointCloud<pcl::PointXYZI>::Ptr aligned(new pcl::PointCloud<pcl::PointXYZI>);
-            pcl::transformPointCloud(*scan_in_fixed, *aligned, correction);
+            pcl::transformPointCloud<pcl::PointXYZI>(*scan_in_fixed, *aligned, correction);
             *accumulated_cloud_ += *aligned;
             RCLCPP_INFO(this->get_logger(),
                 "[ACCUMULATOR] Scan #%d: GICP OK  iters=%zu  dt=%.4fm  dr=%.3fdeg -> Total: %zu pts",
@@ -398,6 +407,32 @@ private:
 
         prev_tf_translation_ = tf_t;
         scan_count_++;
+        block_scan_count_++;
+
+        // After accumulation, if scan_num == 3, save merged block and clear
+        if (block_scan_count_ == 3) {
+            // Debug: check intensity range before saving
+            float min_intensity = std::numeric_limits<float>::max();
+            float max_intensity = std::numeric_limits<float>::lowest();
+            for (const auto& p : accumulated_cloud_->points) {
+                min_intensity = std::min(min_intensity, p.intensity);
+                max_intensity = std::max(max_intensity, p.intensity);
+            }
+            RCLCPP_INFO(this->get_logger(),
+                "[ACCUMULATOR] Saving block #%d: intensity range [%.3f .. %.3f] (type: PointXYZI)",
+                block_num, min_intensity, max_intensity);
+            std::string merged_path = block_folder + "/block" + std::to_string(block_num) + ".pcd";
+            try {
+                pcl::io::savePCDFileBinary(merged_path, *accumulated_cloud_);
+                RCLCPP_INFO(this->get_logger(),
+                    "[ACCUMULATOR] Saved merged block #%d -> %s (%zu pts)",
+                    block_num, merged_path.c_str(), accumulated_cloud_->size());
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "Failed to save merged block: %s", e.what());
+            }
+            accumulated_cloud_->clear(); // Start new block
+            block_scan_count_ = 0;
+        }
     }
 
     // ---------------------------------------------------------------
@@ -428,8 +463,7 @@ private:
             response->message = "No scans accumulated yet";
             return;
         }
-        std::string filename = output_directory_ + "/laser_scan_" +
-                               std::to_string(this->get_clock()->now().seconds()) + ".pcd";
+        std::string filename = output_directory_ + "/" + position_prefix_ + ".pcd";
         try {
             pcl::io::savePCDFileBinary(filename, *accumulated_cloud_);
             response->success = true;
@@ -494,9 +528,11 @@ private:
     Eigen::Vector3d prev_tf_translation_;
     std::mutex cloud_mutex_;
     int scan_count_;
+    int block_scan_count_;
 
     std::string fixed_frame_;
     std::string output_directory_;
+    std::string position_prefix_;   // set via: ros2 param set /scan_accumulator position_prefix pos2
     double gicp_max_corr_;
     int    gicp_max_iter_;
     double gicp_downsample_;

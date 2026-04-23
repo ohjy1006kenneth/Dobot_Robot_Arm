@@ -5,27 +5,27 @@ from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
     # Get the path to the package and URDF
     pkg_bringup = get_package_share_directory('surface_reconstruction')
     urdf_file = os.path.join(pkg_bringup, 'urdf', 'surface_reconstruction.urdf')
-    map_dir = os.path.join(pkg_bringup, 'map', 'CATS_Lab')
     rslidar_config_file = os.path.join(pkg_bringup, 'config', 'rslidar_config.yaml')
-    fastlivo_config_file = os.path.join(pkg_bringup, 'config', 'fast_livo_airy.yaml')
 
     # Robot State Publisher (Reads URDF and publishes TF)
     with open(urdf_file, 'r') as infp:
         robot_desc = infp.read()
-        
+
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
         output='screen',
         arguments=['robot_description'],
-        parameters=[{'robot_description': robot_desc,
-                    'use_sim_time': False,
-                    'ignore_timestamp': True
-                }],
+        parameters=[{
+            'robot_description': robot_desc,
+            'use_sim_time': False,
+            'ignore_timestamp': True,
+        }],
         remappings=[('/joint_states', '/joint_states_robot')]
     )
 
@@ -35,63 +35,66 @@ def generate_launch_description():
             os.path.join(get_package_share_directory('cr_robot_ros2'), 'launch', 'dobot_bringup_ros2.launch.py')
         )
     )
-    
+
     # Pointcloud to Laserscan
     pc_to_laserscan = Node(
         package='pointcloud_to_laserscan',
         executable='pointcloud_to_laserscan_node',
         name='pointcloud_to_laserscan',
         remappings=[
-            ('cloud_in', '/rslidar_points'), # Raw point cloud from LiDAR
-            ('scan', '/scan')                # 2D Output from Nav2
+            ('cloud_in', '/rslidar_points'),
+            ('scan', '/scan')
         ],
         parameters=[{
             'target_frame': 'rslidar',
-            'transform_tolerance': 0.01,
-            'min_height': 0.5,    # Distance to look down 
-            'max_height': 2.0,     # Distance to look up 
-            'angle_min': -1.5708,  # Look 90 degrees to the left
-            'angle_max': 1.5708,   # Look 90 degrees to the right
+            'transform_tolerance': 0.2,
+            'min_height': -0.5,
+            'max_height': 1.0,
+            'angle_min': -1.5708,
+            'angle_max': 1.5708,
             'use_inf': True,
-            'range_min': 0.4,      # Ignore Zone
+            'range_min': 0.15,
+            'use_sim_time': False,
         }]
     )
-    
-    # Nav2 Bringup
-    nav2_launch = IncludeLaunchDescription(
+
+    # Nav2 Localization (map_server + amcl) - publishes map->odom when active
+    nav2_localization_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(get_package_share_directory('nav2_bringup'), 'launch', 'localization_launch.py')
+        ),
+        launch_arguments={
+            'use_sim_time': 'False',
+            'autostart': 'True',
+            'params_file': os.path.join(pkg_bringup, 'config', 'nav2_params.yaml'),
+            'use_composition': 'False',
+            'map': os.path.join(pkg_bringup, 'map', 'CATS_Lab.yaml'),
+        }.items()
+    )
+
+    # Nav2 Navigation stack
+    nav2_navigation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py')
         ),
         launch_arguments={
-            'use_sim_time': 'false',
-            'autostart': 'true',
+            'use_sim_time': 'False',
+            'autostart': 'True',
             'params_file': os.path.join(pkg_bringup, 'config', 'nav2_params.yaml'),
-            'use_composition': 'false'
+            'use_composition': 'False',
         }.items()
     )
-    
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory('nav2_bringup'), 'launch', 'rviz_launch.py')
-        ),
-        launch_arguments={
-            'publish_odom_tf': 'true',
-            'map': map_dir
-        }.items()
-    )
-    
+
     # Ranger Base Bringup
     ranger_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('ranger_base'), 'launch', 'ranger.launch.py'
-            )
+            os.path.join(get_package_share_directory('ranger_base'), 'launch', 'ranger.launch.py')
         ),
         launch_arguments={
             'publish_odom_tf': 'true'
         }.items()
     )
-    
+
     # RoboSense LiDAR Node
     rslidar_node = Node(
         namespace='rslidar_sdk',
@@ -101,78 +104,12 @@ def generate_launch_description():
         parameters=[{'config_path': rslidar_config_file}]
     )
 
-    # IMU relay: converts g-force -> m/s² for FAST_LIO
-    imu_relay_node = Node(
-        package='surface_reconstruction',
-        executable='imu_g_to_ms2_relay',
-        name='imu_g_to_ms2_relay',
-        output='screen',
-        parameters=[{
-            'input_topic':  '/rslidar_imu_data',
-            'output_topic': '/rslidar_imu_data_m2',
-        }]
-    )
-
-    # FAST-LIVO2 Node (LiDAR-Inertial only, img_en: 0)
-    fast_livo_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory('fast_livo'), 'launch', 'mapping_airy.launch.py')
-        ),
-        launch_arguments={
-            'airy_params_file': fastlivo_config_file,
-            'use_rviz': 'True'
-        }.items()
-    )
-
-    # Static transform: camera_init -> rslidar
-    # camera_init is FAST-LIVO2's fixed world frame; rslidar is the LiDAR sensor frame.
-    # This is an identity transform — they start co-located at origin.
-    static_tf_lidar = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_camera_init_to_rslidar',
-        arguments=['0', '0', '0', '0', '0', '0', 'camera_init', 'rslidar'],
-        output='screen'
-    )
-
-    # Laser scanner driver node (KSJ hardware)
-    laser_driver = Node(
-        package='laser_scanner',
-        executable='laser_driver',
-        name='laser_driver',
-        output='screen',
-        emulate_tty=True,
-    )
-
-    # Scan accumulator: GICP + robot arm TF for pose
-    scan_accumulator = Node(
-        package='laser_scanner',
-        executable='scan_accumulator',
-        name='scan_accumulator',
-        output='screen',
-        emulate_tty=True,
-    )
-
-    # Scanning coordinator: orchestrates trigger → save → clear sequence
-    scanning_coordinator = Node(
-        package='laser_scanner',
-        executable='scanning_coordinator',
-        name='scanning_coordinator',
-        output='screen',
-        emulate_tty=True,
-    )
-
     return LaunchDescription([
         robot_state_publisher,
-        # pc_to_laserscan,
-        # nav2_launch,
+        pc_to_laserscan,
         ranger_launch,
         dobot_launch,
-        static_tf_lidar,
         rslidar_node,
-        imu_relay_node,  #
-        fast_livo_node,
-        laser_driver,
-        scan_accumulator,
-        scanning_coordinator,
+        nav2_localization_launch,
+        nav2_navigation_launch,
     ])

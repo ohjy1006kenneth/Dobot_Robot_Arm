@@ -428,7 +428,7 @@
   </link>
 
   <joint name="dobot_to_rslidar" type="fixed">
-    <origin xyz="0 0 0.05" rpy="0 0 -1.0472" />
+    <origin xyz="0 0 0.05" rpy="0 0 1.0472" />
     <parent link="Link6" />
     <child link="rslidar" />
   </joint>

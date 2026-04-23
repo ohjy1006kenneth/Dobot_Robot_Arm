@@ -7,12 +7,16 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+find_package(rclpy REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)              
+find_package(rcl_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io registration filters)
 find_package(tf2_ros REQUIRED)
@@ -52,8 +56,8 @@ ament_target_dependencies(laser_driver
   pcl_conversions
 )
 
-add_executable(scan_accumulator src/scan_accumulator.cpp)
-ament_target_dependencies(scan_accumulator 
+add_executable(scan_accumulator_cpp src/scan_accumulator.cpp)
+ament_target_dependencies(scan_accumulator_cpp
     rclcpp 
     sensor_msgs 
     std_srvs
@@ -62,22 +66,41 @@ ament_target_dependencies(scan_accumulator
     tf2_eigen
     pcl_conversions
 )
-target_link_libraries(scan_accumulator
+target_link_libraries(scan_accumulator_cpp
     ${PCL_LIBRARIES}
     OpenMP::OpenMP_CXX
     ${SMALL_GICP_DIR}/../../build/small_gicp/libsmall_gicp.so
 )
 
-add_executable(scanning_coordinator src/scanning_coordinator.cpp)
-ament_target_dependencies(scanning_coordinator 
+add_executable(scanning_coordinator_cpp src/scanning_coordinator.cpp)
+ament_target_dependencies(scanning_coordinator_cpp
     rclcpp 
     std_msgs
     std_srvs
+    rcl_interfaces
+)
+
+add_executable(map_merger_cpp src/map_merger.cpp)
+ament_target_dependencies(map_merger_cpp
+    rclcpp
+    sensor_msgs
+    std_srvs
+    geometry_msgs
+    tf2_ros
+    tf2_eigen
+    pcl_conversions
+    rcl_interfaces
+)
+target_include_directories(map_merger_cpp PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(map_merger_cpp
+    ${PCL_LIBRARIES}
+    OpenMP::OpenMP_CXX
+    ${SMALL_GICP_DIR}/../../build/small_gicp/libsmall_gicp.so
 )
 
 
 target_include_directories(laser_driver PRIVATE ${PCL_INCLUDE_DIRS} ${KSJ3D_INCLUDE_DIR})
-target_include_directories(scan_accumulator PRIVATE ${PCL_INCLUDE_DIRS})
+target_include_directories(scan_accumulator_cpp PRIVATE ${PCL_INCLUDE_DIRS})
 
 set(KSJ_LIB ${PROJECT_SOURCE_DIR}/include/KSJApi.bin/x64/libKSJApi3D.so)
 
@@ -97,9 +120,9 @@ install(TARGETS laser_driver
 )
 
 install(TARGETS
-    laser_driver
-    scan_accumulator
-    scanning_coordinator
+    scan_accumulator_cpp
+    scanning_coordinator_cpp
+    map_merger_cpp
     DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -120,5 +143,16 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+# ── Python nodes ──────────────────────────────────────────
+ament_python_install_package(${PROJECT_NAME})
+
+install(PROGRAMS
+    scripts/scan_accumulator
+    scripts/scanning_coordinator
+    scripts/map_merger
+    DESTINATION lib/${PROJECT_NAME}
+)
+# ──────────────────────────────────────────────────────────
 
 ament_package()

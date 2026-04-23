@@ -1,3 +1,8 @@
+// scanning_coordinator.cpp
+//
+// Orchestrates: /start_repair → 3 arm scans → /map_merger/add_block (auto-merge)
+// No position limit — trigger as many times as needed.
+// Call /map_merger/save when done to write merged_map.pcd.
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -5,100 +10,72 @@
 #include "std_srvs/srv/empty.hpp"
 
 using Trigger = std_srvs::srv::Trigger;
-using Empty = std_srvs::srv::Empty;
+using Empty   = std_srvs::srv::Empty;
 using namespace std::chrono_literals;
 
 class ScanningCoordinatorNode : public rclcpp::Node
 {
 public:
     ScanningCoordinatorNode()
-        : Node("scanning_coordinator"), 
+        : Node("scanning_coordinator"),
           current_scan_(0),
-          state_(State::IDLE),
+          block_count_(0),
           sequence_active_(false),
           // ======== ADJUST THESE VARIABLES AS NEEDED ========
-          num_scans_(3),                        // Number of scans to perform
-          delay_before_first_scan_(2.4),        // Delay before first scan (seconds)
-          delay_between_scans_(13.1),           // Delay between scans (seconds)
-          delay_before_save_(2.0),              // Delay before saving (seconds)
-          delay_before_clear_(2.0)              // Delay before clearing (seconds)
+          num_scans_(3),                    // arm strips per block
+          delay_before_first_scan_(2.4),    // seconds before first trigger
+          delay_between_scans_(13.1),       // seconds between arm strips
+          delay_before_add_block_(2.0)      // seconds after last scan before adding to world map
           // ===================================================
     {
-        
-        // Create service clients
-        scan_client_ = this->create_client<Trigger>("/scanner/trigger_scan");
-        save_client_ = this->create_client<Trigger>("/scanner/save_merged_cloud");
-        clear_client_ = this->create_client<Empty>("/scanner/clear_scans");
-        
-        // Subscribe to trigger topic
+        scan_client_      = this->create_client<Trigger>("/scanner/trigger_scan");
+        add_block_client_ = this->create_client<Trigger>("/map_merger/add_block");
+
         sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/start_repair",
-            10,
+            "/start_repair", 10,
             std::bind(&ScanningCoordinatorNode::trigger_callback, this, std::placeholders::_1));
-        
-        RCLCPP_INFO(this->get_logger(), "[COORDINATOR] Ready - Waiting for /start_repair trigger (3 scans)");
+
+        RCLCPP_INFO(this->get_logger(),
+            "[COORDINATOR] Ready — publish /start_repair to begin a 3-scan block.\n"
+            "  Repeat as many times as needed at any position.\n"
+            "  Call /map_merger/save when finished to write merged_map.pcd");
     }
 
 private:
-    enum class State {
-        IDLE,
-        SCANNING,
-        SAVING,
-        CLEARING,
-        DONE
-    };
-
     void trigger_callback(const std_msgs::msg::Bool::SharedPtr msg)
     {
-        // Only trigger on TRUE message and when not already active
-        if (msg->data && !sequence_active_)
-        {
-            RCLCPP_INFO(this->get_logger(), "[COORDINATOR] ▶ Starting %d-scan sequence", num_scans_);
-            
-            sequence_active_ = true;
-            current_scan_ = 0;
-            start_scan_sequence();
-        }
-    }
+        if (!msg->data || sequence_active_) return;
 
-    void start_scan_sequence()
-    {
+        block_count_++;
+        RCLCPP_INFO(this->get_logger(),
+            "[COORDINATOR] ▶ Block #%d — starting %d-scan sequence", block_count_, num_scans_);
+
+        sequence_active_ = true;
         current_scan_ = 1;
-        
-        // Wait before first scan
+
         delay_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(static_cast<int>(delay_before_first_scan_ * 1000)),
-            [this]() {
-                delay_timer_->cancel();
-                trigger_next_scan();
-            });
+            [this]() { delay_timer_->cancel(); trigger_next_scan(); });
     }
 
     void trigger_next_scan()
     {
         if (current_scan_ > num_scans_)
         {
-            // All scans complete, wait then save
             delay_timer_ = this->create_wall_timer(
-                std::chrono::milliseconds(static_cast<int>(delay_before_save_ * 1000)),
-                [this]() {
-                    delay_timer_->cancel();
-                    finish_scanning_and_save();
-                });
+                std::chrono::milliseconds(static_cast<int>(delay_before_add_block_ * 1000)),
+                [this]() { delay_timer_->cancel(); add_block(); });
             return;
         }
 
-        RCLCPP_INFO(this->get_logger(), "[COORDINATOR] Triggering scan %d/%d...", current_scan_, num_scans_);
-        
-        // Wait before next scan (robot movement handled externally)
+        RCLCPP_INFO(this->get_logger(),
+            "[COORDINATOR] Triggering strip %d/%d...", current_scan_, num_scans_);
+
         if (current_scan_ > 1)
         {
             delay_timer_ = this->create_wall_timer(
                 std::chrono::milliseconds(static_cast<int>(delay_between_scans_ * 1000)),
-                [this]() {
-                    delay_timer_->cancel();
-                    trigger_scan();
-                });
+                [this]() { delay_timer_->cancel(); trigger_scan(); });
         }
         else
         {
@@ -108,128 +85,71 @@ private:
 
     void trigger_scan()
     {
-        state_ = State::SCANNING;
-        
         if (!scan_client_->wait_for_service(2s))
         {
-            RCLCPP_ERROR(this->get_logger(), "Scanner service unavailable!");
-            state_ = State::IDLE;
+            RCLCPP_ERROR(this->get_logger(), "[COORDINATOR] Scanner service unavailable!");
             sequence_active_ = false;
             return;
         }
-
-        auto scan_request = std::make_shared<Trigger::Request>();
-        scan_client_->async_send_request(scan_request,
-            std::bind(&ScanningCoordinatorNode::scan_response_callback, this, std::placeholders::_1));
+        scan_client_->async_send_request(
+            std::make_shared<Trigger::Request>(),
+            [this](rclcpp::Client<Trigger>::SharedFuture future) {
+                auto resp = future.get();
+                if (resp->success) {
+                    RCLCPP_INFO(this->get_logger(),
+                        "[COORDINATOR] ✓ Strip %d/%d done", current_scan_, num_scans_);
+                    current_scan_++;
+                    trigger_next_scan();
+                } else {
+                    RCLCPP_ERROR(this->get_logger(),
+                        "[COORDINATOR] ✗ Strip %d failed: %s", current_scan_, resp->message.c_str());
+                    sequence_active_ = false;
+                }
+            });
     }
 
-    void scan_response_callback(rclcpp::Client<Trigger>::SharedFuture future)
+    void add_block()
     {
-        auto response = future.get();
-        if (response->success)
-        {
-            RCLCPP_INFO(this->get_logger(), "[COORDINATOR] ✓ Scan %d/%d complete", current_scan_, num_scans_);
-            current_scan_++;
-            trigger_next_scan();
-        }
-        else
-        {
-            RCLCPP_ERROR(this->get_logger(), "[COORDINATOR] ✗ Scan %d FAILED: %s", current_scan_, response->message.c_str());
-            state_ = State::IDLE;
-            sequence_active_ = false;
-        }
-    }
+        RCLCPP_INFO(this->get_logger(),
+            "[COORDINATOR] Block #%d complete — merging into world map...", block_count_);
 
-    void finish_scanning_and_save()
-    {
-        RCLCPP_INFO(this->get_logger(), "[COORDINATOR] Saving merged cloud...");
-        
-        state_ = State::SAVING;
-        
-        if (!save_client_->wait_for_service(2s))
+        if (!add_block_client_->wait_for_service(2s))
         {
-            RCLCPP_ERROR(this->get_logger(), "Save service unavailable!");
-            state_ = State::IDLE;
+            RCLCPP_ERROR(this->get_logger(), "[COORDINATOR] /map_merger/add_block unavailable!");
             sequence_active_ = false;
             return;
         }
-
-        auto save_request = std::make_shared<Trigger::Request>();
-        save_client_->async_send_request(save_request,
-            std::bind(&ScanningCoordinatorNode::save_response_callback, this, std::placeholders::_1));
+        add_block_client_->async_send_request(
+            std::make_shared<Trigger::Request>(),
+            [this](rclcpp::Client<Trigger>::SharedFuture future) {
+                auto resp = future.get();
+                if (resp->success) {
+                    RCLCPP_INFO(this->get_logger(),
+                        "[COORDINATOR] ✓ %s\n"
+                        "  → Publish /start_repair again or call /map_merger/save",
+                        resp->message.c_str());
+                } else {
+                    RCLCPP_ERROR(this->get_logger(),
+                        "[COORDINATOR] add_block failed: %s", resp->message.c_str());
+                }
+                sequence_active_ = false;
+            });
     }
 
-    void save_response_callback(rclcpp::Client<Trigger>::SharedFuture future)
-    {
-        auto response = future.get();
-        if (response->success)
-        {
-            RCLCPP_INFO(this->get_logger(), "[COORDINATOR] ✓ %s", response->message.c_str());
-            
-            // Wait before clearing
-            delay_timer_ = this->create_wall_timer(
-                std::chrono::milliseconds(static_cast<int>(delay_before_clear_ * 1000)),
-                [this]() {
-                    delay_timer_->cancel();
-                    clear_scans();
-                });
-        }
-        else
-        {
-            RCLCPP_ERROR(this->get_logger(), "Save failed: %s", response->message.c_str());
-            state_ = State::IDLE;
-            sequence_active_ = false;
-        }
-    }
-
-    void clear_scans()
-    {
-        state_ = State::CLEARING;
-        
-        if (!clear_client_->wait_for_service(2s))
-        {
-            RCLCPP_ERROR(this->get_logger(), "Clear service unavailable!");
-            state_ = State::IDLE;
-            sequence_active_ = false;
-            return;
-        }
-
-        auto clear_request = std::make_shared<Empty::Request>();
-        clear_client_->async_send_request(clear_request,
-            std::bind(&ScanningCoordinatorNode::clear_response_callback, this, std::placeholders::_1));
-    }
-
-    void clear_response_callback(rclcpp::Client<Empty>::SharedFuture future)
-    {
-        state_ = State::DONE;
-        RCLCPP_INFO(this->get_logger(), "[COORDINATOR] ■ Sequence complete - Ready for next trigger");
-        
-        state_ = State::IDLE;
-        sequence_active_ = false;
-    }
-
-    // ============ CONFIGURATION VARIABLES (EDIT THESE) ============
-    int num_scans_;
+    // ============ CONFIG ============
+    int    num_scans_;
     double delay_before_first_scan_;
     double delay_between_scans_;
-    double delay_before_save_;
-    double delay_before_clear_;
-    // ===============================================================
-    
-    // Service clients
+    double delay_before_add_block_;
+    // ================================
+
     rclcpp::Client<Trigger>::SharedPtr scan_client_;
-    rclcpp::Client<Trigger>::SharedPtr save_client_;
-    rclcpp::Client<Empty>::SharedPtr clear_client_;
-    
-    // Topic subscription
+    rclcpp::Client<Trigger>::SharedPtr add_block_client_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_;
-    
-    // Delay timer
     rclcpp::TimerBase::SharedPtr delay_timer_;
-    
-    // State tracking
-    int current_scan_;
-    State state_;
+
+    int  current_scan_;
+    int  block_count_;
     bool sequence_active_;
 };
 

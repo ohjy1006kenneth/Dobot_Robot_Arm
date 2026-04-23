@@ -16,8 +16,8 @@ ament_target_dependencies(imu_g_to_ms2_relay rclcpp sensor_msgs)
 install(TARGETS imu_g_to_ms2_relay DESTINATION lib/${PROJECT_NAME})
 
 install(
-  DIRECTORY launch urdf config
-  DESTINATION share/${PROJECT_NAME}/
+  DIRECTORY launch urdf config map
+  DESTINATION share/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
