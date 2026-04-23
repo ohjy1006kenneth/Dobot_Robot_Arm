@@ -107,12 +107,32 @@ def generate_launch_description():
         parameters=[{'config_path': rslidar_config_file}]
     )
 
+    # Laser scanner pipeline (driver + accumulator + coordinator)
+    laser_scanner_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(get_package_share_directory('laser_scanner'), 'launch', 'scanner_system.launch.py')
+        )
+    )
+
+    # When Nav2 reaches a goal, publish /start_repair (std_msgs/Empty)
+    nav2_arrival_trigger = Node(
+        package='surface_reconstruction',
+        executable='nav2_arrival_trigger',
+        name='nav2_arrival_trigger',
+        output='screen',
+        parameters=[{
+            'use_sim_time': False,
+        }]
+    )
+
     return LaunchDescription([
         robot_state_publisher,
         pc_to_laserscan,
         ranger_launch,
         dobot_launch,
         rslidar_node,
+        laser_scanner_launch,
         nav2_localization_launch,
         nav2_navigation_launch,
+        nav2_arrival_trigger,
     ])

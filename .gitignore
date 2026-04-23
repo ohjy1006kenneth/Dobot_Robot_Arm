@@ -54,3 +54,21 @@ docs/
 # === Misc ===
 .DS_Store
 Thumbs.db
+
+# Large generated artifacts
+*.ply
+*.pcd
+*.bag
+*.bag2
+*.db3
+blocks/**/block*.ply
+
+# ROS 2 build/install/log
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+

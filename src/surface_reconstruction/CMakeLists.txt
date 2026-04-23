@@ -9,11 +9,20 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 # IMU unit relay node (g -> m/s²)
 add_executable(imu_g_to_ms2_relay src/imu_g_to_ms2_relay.cpp)
 ament_target_dependencies(imu_g_to_ms2_relay rclcpp sensor_msgs)
 install(TARGETS imu_g_to_ms2_relay DESTINATION lib/${PROJECT_NAME})
+
+# Nav2 arrival -> /start_repair trigger
+add_executable(nav2_arrival_trigger src/nav2_arrival_trigger.cpp)
+ament_target_dependencies(nav2_arrival_trigger rclcpp rclcpp_action nav2_msgs std_msgs geometry_msgs)
+install(TARGETS nav2_arrival_trigger DESTINATION lib/${PROJECT_NAME})
 
 install(
   DIRECTORY launch urdf config map
