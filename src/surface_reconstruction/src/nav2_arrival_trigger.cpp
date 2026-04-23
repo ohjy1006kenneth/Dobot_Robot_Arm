@@ -5,7 +5,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 
 #include "nav2_msgs/action/navigate_to_pose.hpp"
-#include "std_msgs/msg/empty.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 class Nav2ArrivalTrigger : public rclcpp::Node
 {
@@ -16,7 +16,7 @@ public:
   explicit Nav2ArrivalTrigger(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : Node("nav2_arrival_trigger", options)
   {
-    start_repair_pub_ = this->create_publisher<std_msgs::msg::Empty>("/start_repair", 10);
+    start_repair_pub_ = this->create_publisher<std_msgs::msg::Bool>("/start_repair", 10);
 
     // RViz Nav2 Goal Tool publishes geometry_msgs/PoseStamped on /goal_pose when using Nav2.
     goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -57,8 +57,9 @@ private:
   void on_result(const rclcpp_action::ClientGoalHandle<NavigateToPose>::WrappedResult & result)
   {
     if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-      RCLCPP_INFO(get_logger(), "Nav2 goal SUCCEEDED. Publishing /start_repair.");
-      std_msgs::msg::Empty msg;
+      RCLCPP_INFO(get_logger(), "Nav2 goal SUCCEEDED. Publishing /start_repair=true.");
+      std_msgs::msg::Bool msg;
+      msg.data = true;
       start_repair_pub_->publish(msg);
     } else if (result.code == rclcpp_action::ResultCode::ABORTED) {
       RCLCPP_WARN(get_logger(), "Nav2 goal ABORTED. Not publishing /start_repair.");
@@ -69,7 +70,7 @@ private:
     }
   }
 
-  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr start_repair_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_repair_pub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
   rclcpp_action::Client<NavigateToPose>::SharedPtr action_client_;
 
