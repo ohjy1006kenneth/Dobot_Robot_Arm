@@ -15,6 +15,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)              
 find_package(rcl_interfaces REQUIRED)
+find_package(dobot_msgs_v4 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -75,6 +76,7 @@ target_link_libraries(scan_accumulator_cpp
 add_executable(scanning_coordinator_cpp src/scanning_coordinator.cpp)
 ament_target_dependencies(scanning_coordinator_cpp
     rclcpp 
+    dobot_msgs_v4
     std_msgs
     std_srvs
     rcl_interfaces

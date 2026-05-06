@@ -36,6 +36,7 @@ _GICP_MAX_CORR            = 0.10
 _GICP_MAX_ITER            = 200
 _GICP_VOXEL               = 0.005
 _GICP_THREADS             = 4
+_OVERLAP_ROI_RATIO        = 0.30
 _FLOOR_BAND_M             = 0.020
 _FLOOR_PERCENTILE         = 0.02
 _MAX_GICP_TRANS_M         = 0.15
@@ -55,6 +56,17 @@ def _remove_floor(pts: np.ndarray, floor_z: float, band: float) -> np.ndarray:
     """Return points whose |Z - floor_z| > band (keep structure, remove floor)."""
     mask = np.abs(pts[:, 2] - floor_z) > band
     return pts[mask]
+
+
+def _crop_x_edge(pts: np.ndarray, ratio: float, keep_right: bool) -> np.ndarray:
+    """Keep only the left or right X-edge band of the cloud."""
+    if pts.shape[0] == 0:
+        return pts
+    ratio = min(max(ratio, 0.05), 0.95)
+    x_min = float(np.min(pts[:, 0]))
+    x_max = float(np.max(pts[:, 0]))
+    threshold = x_max - (x_max - x_min) * ratio if keep_right else x_min + (x_max - x_min) * ratio
+    return pts[pts[:, 0] >= threshold] if keep_right else pts[pts[:, 0] <= threshold]
 
 
 def _ros_msg_to_numpy(msg: PointCloud2) -> np.ndarray:
@@ -133,6 +145,7 @@ class ScanAccumulatorNode(Node):
         self.declare_parameter("gicp_max_iterations",              _GICP_MAX_ITER)
         self.declare_parameter("gicp_downsampling_resolution",     _GICP_VOXEL)
         self.declare_parameter("gicp_num_threads",                 _GICP_THREADS)
+        self.declare_parameter("overlap_roi_ratio",                _OVERLAP_ROI_RATIO)
         self.declare_parameter("floor_band_m",                     _FLOOR_BAND_M)
 
         self._fixed_frame   = self.get_parameter("fixed_frame").value
@@ -141,6 +154,7 @@ class ScanAccumulatorNode(Node):
         self._gicp_max_corr = self.get_parameter("gicp_max_correspondence_distance").value
         self._gicp_max_iter = self.get_parameter("gicp_max_iterations").value
         self._gicp_voxel    = self.get_parameter("gicp_downsampling_resolution").value
+        self._overlap_roi_ratio = self.get_parameter("overlap_roi_ratio").value
         self._floor_band    = self.get_parameter("floor_band_m").value
 
         os.makedirs(self._output_dir, exist_ok=True)
@@ -172,6 +186,7 @@ class ScanAccumulatorNode(Node):
         self.get_logger().info(
             f"[ACCUMULATOR] Ready — fixed_frame={self._fixed_frame}  "
             f"prefix={self._prefix}  corr={self._gicp_max_corr:.3f}m  "
+            f"overlap_roi={self._overlap_roi_ratio * 100:.0f}%  "
             f"floor_band=±{self._floor_band * 1000:.1f}mm")
 
     # ── TF lookup ────────────────────────────────────────────────────────────
@@ -256,7 +271,20 @@ class ScanAccumulatorNode(Node):
                     f"Total: {self._accumulated_pts.shape[0]} pts")
                 return
 
-            T_corr = _gicp_align(scan_struct, map_struct,
+            map_roi = _crop_x_edge(map_struct, self._overlap_roi_ratio, keep_right=True)
+            scan_roi = _crop_x_edge(scan_struct, self._overlap_roi_ratio, keep_right=False)
+
+            if map_roi.shape[0] < 100 or scan_roi.shape[0] < 100:
+                self._accumulated_pts = np.vstack([self._accumulated_pts, scan_in_fixed])
+                self._scan_count += 1
+                self.get_logger().warn(
+                    f"[ACCUMULATOR] Scan #{self._scan_count}: overlap ROI too small "
+                    f"(map={map_roi.shape[0]} scan={scan_roi.shape[0]}, "
+                    f"ratio={self._overlap_roi_ratio * 100:.0f}%) — TF-only → "
+                    f"Total: {self._accumulated_pts.shape[0]} pts")
+                return
+
+            T_corr = _gicp_align(scan_roi, map_roi,
                                   self._gicp_voxel, self._gicp_max_corr, self._gicp_max_iter)
 
             if T_corr is not None:

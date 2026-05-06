@@ -28,7 +28,10 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rcl_interfaces</depend>
+  <depend>dobot_msgs_v4</depend>
   <depend>robot_state_publisher</depend>
+  <exec_depend>cr_robot_ros2</exec_depend>
+  <exec_depend>robot_arm</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

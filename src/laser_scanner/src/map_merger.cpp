@@ -110,7 +110,8 @@ public:
         }
 
         block_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/scanner/merged_cloud", 1,
+            "/scanner/merged_cloud",
+            rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
             std::bind(&MapMergerNode::blockCloudCallback, this, std::placeholders::_1));
 
         map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -448,4 +449,3 @@ int main(int argc, char* argv[])
     rclcpp::shutdown();
     return 0;
 }
-

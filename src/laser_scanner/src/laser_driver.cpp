@@ -1,6 +1,7 @@
 #include <memory>
 #include <limits>
 #include <cmath>
+#include <stdexcept>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -39,13 +40,17 @@ public:
         publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             "/scanner/single_scan", 10);
 
+        if (!initializeScanner()) {
+            RCLCPP_FATAL(this->get_logger(),
+                         "[SCANNER] Initialization failed. /scanner/trigger_scan will not be advertised.");
+            throw std::runtime_error("KSJ scanner initialization failed");
+        }
+
         // Service to trigger a single scan
         scan_service_ = this->create_service<std_srvs::srv::Trigger>(
             "/scanner/trigger_scan",
             std::bind(&KsjDriverNode::triggerScanCallback, this, 
                      std::placeholders::_1, std::placeholders::_2));
-
-        initializeScanner();
     }
 
     ~KsjDriverNode()
@@ -58,76 +63,95 @@ public:
 
 private:
 
-    void initializeScanner()
+    bool initializeScanner()
     {
         int ret = KSJ3D_Inital();
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_Inital failed: %d", ret);
+            return false;
         }
         int device_count = 0;
         ret = KSJ3D_GetDeviceCount(&device_count);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_GetDeviceCount failed: %d", ret);
+            return false;
         }
         if (device_count <= 0) {
             RCLCPP_ERROR(this->get_logger(), "No scanner devices found!");
-            return;
+            return false;
         }
         int nType, nSerial;
         unsigned short usFX3, usFPGA;
         ret = KSJ3D_GetDeviceInformation(0, &nType, &nSerial, &usFX3, &usFPGA);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_GetDeviceInformation failed: %d", ret);
+            return false;
         }
         int nColMax, nRowMax;
         ret = KSJ3D_GetRoiMax(0, &nColMax, &nRowMax);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_GetRoiMax failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetRoi(0, 0, 0, nColMax, nRowMax);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetRoi failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetExposureTime(0, EXPOSURE_TIME_MS);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetExposureTime failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetGain(0, GAIN);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetGain failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_Set3DLaserLineBrightnessThreshold(0, BRIGHTNESS_THRESHOLD);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_Set3DLaserLineBrightnessThreshold failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_Set3DLaserLineBrightnessLowThreshold(0, BRIGHTNESS_LOW_THRESHOLD);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_Set3DLaserLineBrightnessLowThreshold failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_Set3DLaserLineWidth(0, LASER_LINE_WIDTH);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_Set3DLaserLineWidth failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetStartTrigger(0, STS_INPUT_0, false, TEM_RISING_EDGE);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetStartTrigger failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetDataTriggerMode(0, DTM_INTERNAL);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetDataTriggerMode failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_LaserModeSet(0, LM_FLASH);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_LaserModeSet failed: %d", ret);
+            return false;
         }
         float fResY;
         ret = KSJ3D_SetYResolution(0, Y_RESOLUTION_MM);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetYResolution failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_GetYResolution(0, &fResY);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_GetYResolution failed: %d", ret);
+            return false;
+        }
+        if (fResY <= 0.0f) {
+            RCLCPP_ERROR(this->get_logger(), "Invalid scanner Y resolution: %.6f", fResY);
+            return false;
         }
         double scan_duration_s = Y_TRAVEL_DISTANCE_MM / (ROBOT_SPEED_M_S * 1000.0);
         int num_profiles = static_cast<int>(Y_TRAVEL_DISTANCE_MM / fResY);
@@ -139,27 +163,33 @@ private:
         ret = KSJ3D_SetDataTriggerInternalFrequency(0, scan_rate_hz);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetDataTriggerInternalFrequency failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetMaxNumberOfProfilesToCapture(0, num_profiles);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetMaxNumberOfProfilesToCapture failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetDataFormat(0, KSJ3D_DF_UNIFORMX_INDENSITY);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetDataFormat failed: %d", ret);
+            return false;
         }
         float fMin, fMax;
         ret = KSJ3D_GetUniformXResolutionRange(0, &fMin, &fMax);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_GetUniformXResolutionRange failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_SetUniformXResolution(0, fMin);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_SetUniformXResolution failed: %d", ret);
+            return false;
         }
         ret = KSJ3D_GetUniformXResolution(0, &g_fXStart, &g_fXRes, &g_nUniformWidth);
         if (ret != 0) {
             RCLCPP_ERROR(this->get_logger(), "KSJ3D_GetUniformXResolution failed: %d", ret);
+            return false;
         }
         float x_width_mm = g_nUniformWidth * g_fXRes;
         RCLCPP_INFO(this->get_logger(), "[SCANNER] Scan dimensions:");
@@ -170,6 +200,7 @@ private:
         KSJ3D_RegisterZIDataCB(0, &KsjDriverNode::ZICallbackStatic, this);
         RCLCPP_INFO(this->get_logger(), "[SCANNER] Ready - %dHz, %d profiles, %.1fs scan time", 
                     scan_rate_hz, num_profiles, scan_duration_s);
+        return true;
     }
 
     void triggerScanCallback(

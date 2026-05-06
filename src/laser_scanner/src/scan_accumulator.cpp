@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <memory>
+#include <numeric>
 #include <vector>
 #include <mutex>
 #include <filesystem>
@@ -12,6 +14,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_eigen/tf2_eigen.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -38,6 +41,10 @@ static const int    GICP_MAX_ITERATIONS              = 200;
 static const double GICP_DOWNSAMPLING_RESOLUTION     = 0.005; // 5 mm voxel (more points survive)
 static const int    GICP_NUM_THREADS                 = 4;
 static const int    GICP_NUM_NEIGHBORS               = 20;
+static const double OVERLAP_ROI_RATIO                = 0.30;  // use edge bands only for strip-to-strip GICP
+static const int    DYNAMIC_ROI_BINS                 = 24;
+static const double DYNAMIC_ROI_SCORE_THRESHOLD      = 0.45;
+static const int    DYNAMIC_ROI_MIN_BIN_POINTS       = 1500;
 
 // Floor filtering for GICP input
 // Points whose Z (in base_link) is within FLOOR_BAND_M of the detected
@@ -48,6 +55,25 @@ static const int    GICP_NUM_NEIGHBORS               = 20;
 static const double FLOOR_BAND_M            = 0.020;  // +-20 mm around floor = removed
 static const double FLOOR_DETECT_PERCENTILE = 0.02;   // bottom 2% of Z = floor level
 // ============================================================================
+
+static std::string getStringParameter(
+    rclcpp::Node& node,
+    const std::string& name,
+    const std::string& default_value)
+{
+    const auto param = node.get_parameter(name);
+    if (param.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
+        return param.as_string();
+    }
+
+    if (param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
+        // YAML 1.1 treats bare "y" as true and bare "n" as false.
+        // Launch files can hit this even when the intended parameter is a string.
+        return param.as_bool() ? "y" : "n";
+    }
+
+    return default_value;
+}
 
 // ---------------------------------------------------------------------------
 // Detect floor Z level as the P-th percentile of point Z values
@@ -83,6 +109,242 @@ static pcl::PointCloud<pcl::PointXYZI>::Ptr removeFloor(
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Keep only the left or right X-edge band of a cloud.
+// This lets GICP focus on the actual strip overlap instead of the full strip.
+// ---------------------------------------------------------------------------
+static pcl::PointCloud<pcl::PointXYZI>::Ptr cropAxisEdge(
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+    int axis_idx, double ratio, bool keep_high)
+{
+    auto out = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    if (cloud->empty()) {
+        out->width = 0;
+        out->height = 1;
+        out->is_dense = true;
+        return out;
+    }
+
+    ratio = std::clamp(ratio, 0.05, 0.95);
+
+    float axis_min = std::numeric_limits<float>::max();
+    float axis_max = std::numeric_limits<float>::lowest();
+    for (const auto& p : cloud->points) {
+        const float coord = axis_idx == 0 ? p.x : p.y;
+        axis_min = std::min(axis_min, coord);
+        axis_max = std::max(axis_max, coord);
+    }
+
+    const float span = axis_max - axis_min;
+    const float band = static_cast<float>(span * ratio);
+    const float threshold = keep_high ? (axis_max - band) : (axis_min + band);
+
+    out->reserve(cloud->size() / 2);
+    for (const auto& p : cloud->points) {
+        const float coord = axis_idx == 0 ? p.x : p.y;
+        if (keep_high) {
+            if (coord >= threshold) out->points.push_back(p);
+        } else {
+            if (coord <= threshold) out->points.push_back(p);
+        }
+    }
+    out->width = out->points.size();
+    out->height = 1;
+    out->is_dense = true;
+    return out;
+}
+
+struct RoiSelection {
+    pcl::PointCloud<pcl::PointXYZI>::Ptr target;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr source;
+    std::string info;
+    bool valid;
+};
+
+static RoiSelection buildDynamicRoi(
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& target,
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& source,
+    int axis_idx,
+    int bins,
+    double score_threshold,
+    int min_bin_points)
+{
+    RoiSelection out;
+    out.target = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    out.source = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    out.valid = false;
+
+    if (target->empty() || source->empty()) {
+        out.info = "empty structure clouds";
+        return out;
+    }
+
+    float target_min = std::numeric_limits<float>::max();
+    float target_max = std::numeric_limits<float>::lowest();
+    for (const auto& p : target->points) {
+        const float coord = axis_idx == 0 ? p.x : p.y;
+        target_min = std::min(target_min, coord);
+        target_max = std::max(target_max, coord);
+    }
+
+    float source_min = std::numeric_limits<float>::max();
+    float source_max = std::numeric_limits<float>::lowest();
+    for (const auto& p : source->points) {
+        const float coord = axis_idx == 0 ? p.x : p.y;
+        source_min = std::min(source_min, coord);
+        source_max = std::max(source_max, coord);
+    }
+
+    const float overlap_lo = std::max(target_min, source_min);
+    const float overlap_hi = std::min(target_max, source_max);
+    if (overlap_hi <= overlap_lo) {
+        out.info = "no axis overlap";
+        return out;
+    }
+
+    bins = std::max(4, bins);
+    const double step = static_cast<double>(overlap_hi - overlap_lo) / static_cast<double>(bins);
+    if (step <= 0.0) {
+        out.info = "degenerate overlap span";
+        return out;
+    }
+
+    std::vector<double> scores(bins, 0.0);
+    double max_score = 0.0;
+    int best_start = -1;
+    int best_end = -1;
+    double best_sum = -1.0;
+
+    for (int i = 0; i < bins; ++i) {
+        const float bin_lo = static_cast<float>(overlap_lo + step * i);
+        const float bin_hi = (i == bins - 1)
+            ? overlap_hi
+            : static_cast<float>(overlap_lo + step * (i + 1));
+
+        std::vector<float> target_z;
+        std::vector<float> source_z;
+        target_z.reserve(4096);
+        source_z.reserve(4096);
+
+        for (const auto& p : target->points) {
+            const float coord = axis_idx == 0 ? p.x : p.y;
+            const bool in_bin = (i == bins - 1)
+                ? (coord >= bin_lo && coord <= bin_hi)
+                : (coord >= bin_lo && coord < bin_hi);
+            if (in_bin) target_z.push_back(p.z);
+        }
+        for (const auto& p : source->points) {
+            const float coord = axis_idx == 0 ? p.x : p.y;
+            const bool in_bin = (i == bins - 1)
+                ? (coord >= bin_lo && coord <= bin_hi)
+                : (coord >= bin_lo && coord < bin_hi);
+            if (in_bin) source_z.push_back(p.z);
+        }
+
+        if (static_cast<int>(target_z.size()) < min_bin_points ||
+            static_cast<int>(source_z.size()) < min_bin_points)
+        {
+            continue;
+        }
+
+        auto calc_stats = [](const std::vector<float>& zvals, double& z_std, double& z_range) {
+            const double mean = std::accumulate(zvals.begin(), zvals.end(), 0.0) / static_cast<double>(zvals.size());
+            double accum = 0.0;
+            float z_min = std::numeric_limits<float>::max();
+            float z_max = std::numeric_limits<float>::lowest();
+            for (float z : zvals) {
+                const double dz = static_cast<double>(z) - mean;
+                accum += dz * dz;
+                z_min = std::min(z_min, z);
+                z_max = std::max(z_max, z);
+            }
+            z_std = std::sqrt(accum / static_cast<double>(zvals.size()));
+            z_range = static_cast<double>(z_max - z_min);
+        };
+
+        double target_std = 0.0, target_range = 0.0;
+        double source_std = 0.0, source_range = 0.0;
+        calc_stats(target_z, target_std, target_range);
+        calc_stats(source_z, source_std, source_range);
+
+        const double z_std = std::min(target_std, source_std);
+        const double z_range = std::min(target_range, source_range);
+        const double count_term = std::log1p(static_cast<double>(std::min(target_z.size(), source_z.size())));
+        scores[i] = count_term * (0.7 * z_std + 0.3 * z_range);
+        max_score = std::max(max_score, scores[i]);
+    }
+
+    if (max_score <= 0.0) {
+        out.info = "no structured overlap";
+        return out;
+    }
+
+    int run_start = -1;
+    double run_sum = 0.0;
+    for (int i = 0; i < bins; ++i) {
+        const bool good = scores[i] >= max_score * score_threshold;
+        if (good) {
+            if (run_start < 0) {
+                run_start = i;
+                run_sum = 0.0;
+            }
+            run_sum += scores[i];
+        } else if (run_start >= 0) {
+            const int run_end = i - 1;
+            if (run_sum > best_sum) {
+                best_sum = run_sum;
+                best_start = run_start;
+                best_end = run_end;
+            }
+            run_start = -1;
+            run_sum = 0.0;
+        }
+    }
+    if (run_start >= 0) {
+        const int run_end = bins - 1;
+        if (run_sum > best_sum) {
+            best_sum = run_sum;
+            best_start = run_start;
+            best_end = run_end;
+        }
+    }
+
+    if (best_start < 0) {
+        best_start = static_cast<int>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+        best_end = best_start;
+    }
+
+    const float roi_lo = static_cast<float>(overlap_lo + step * best_start);
+    const float roi_hi = (best_end == bins - 1)
+        ? overlap_hi
+        : static_cast<float>(overlap_lo + step * (best_end + 1));
+
+    out.target->reserve(target->size() / 4);
+    out.source->reserve(source->size() / 4);
+    for (const auto& p : target->points) {
+        const float coord = axis_idx == 0 ? p.x : p.y;
+        if (coord >= roi_lo && coord <= roi_hi) out.target->points.push_back(p);
+    }
+    for (const auto& p : source->points) {
+        const float coord = axis_idx == 0 ? p.x : p.y;
+        if (coord >= roi_lo && coord <= roi_hi) out.source->points.push_back(p);
+    }
+    out.target->width = out.target->points.size();
+    out.target->height = 1;
+    out.target->is_dense = true;
+    out.source->width = out.source->points.size();
+    out.source->height = 1;
+    out.source->is_dense = true;
+    out.valid = !out.target->empty() && !out.source->empty();
+
+    const char axis_name = axis_idx == 0 ? 'x' : 'y';
+    out.info = std::string(1, axis_name) + "[" + std::to_string(roi_lo) + "," +
+               std::to_string(roi_hi) + "] bins=" + std::to_string(best_start) + "-" +
+               std::to_string(best_end) + " pts=" + std::to_string(out.target->size()) + "/" +
+               std::to_string(out.source->size());
+    return out;
+}
+
 class ScanAccumulatorNode : public rclcpp::Node
 {
 public:
@@ -96,7 +358,8 @@ public:
             std::bind(&ScanAccumulatorNode::scanCallback, this, std::placeholders::_1));
 
         merged_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-            "/scanner/merged_cloud", 10);
+            "/scanner/merged_cloud",
+            rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
 
         save_service_ = this->create_service<std_srvs::srv::Trigger>(
             "/scanner/save_merged_cloud",
@@ -106,6 +369,11 @@ public:
         clear_service_ = this->create_service<std_srvs::srv::Empty>(
             "/scanner/clear_scans",
             std::bind(&ScanAccumulatorNode::clearScansCallback, this,
+                      std::placeholders::_1, std::placeholders::_2));
+
+        block_ready_service_ = this->create_service<std_srvs::srv::Trigger>(
+            "/scanner/block_ready",
+            std::bind(&ScanAccumulatorNode::blockReadyCallback, this,
                       std::placeholders::_1, std::placeholders::_2));
 
         count_service_ = this->create_service<std_srvs::srv::Trigger>(
@@ -123,6 +391,16 @@ public:
         this->declare_parameter("gicp_max_iterations",              GICP_MAX_ITERATIONS);
         this->declare_parameter("gicp_downsampling_resolution",     GICP_DOWNSAMPLING_RESOLUTION);
         this->declare_parameter("gicp_num_threads",                 GICP_NUM_THREADS);
+        this->declare_parameter("overlap_roi_mode",                 std::string("dynamic_z"));
+        rcl_interfaces::msg::ParameterDescriptor axis_descriptor;
+        axis_descriptor.dynamic_typing = true;
+        this->declare_parameter("overlap_roi_axis",
+                                rclcpp::ParameterValue(std::string("y")),
+                                axis_descriptor);
+        this->declare_parameter("overlap_roi_ratio",                OVERLAP_ROI_RATIO);
+        this->declare_parameter("dynamic_roi_bins",                 DYNAMIC_ROI_BINS);
+        this->declare_parameter("dynamic_roi_score_threshold",      DYNAMIC_ROI_SCORE_THRESHOLD);
+        this->declare_parameter("dynamic_roi_min_bin_points",       DYNAMIC_ROI_MIN_BIN_POINTS);
         this->declare_parameter("floor_band_m",                     FLOOR_BAND_M);
 
         fixed_frame_       = this->get_parameter("fixed_frame").as_string();
@@ -132,6 +410,26 @@ public:
         gicp_max_iter_    = this->get_parameter("gicp_max_iterations").as_int();
         gicp_downsample_  = this->get_parameter("gicp_downsampling_resolution").as_double();
         gicp_num_threads_ = this->get_parameter("gicp_num_threads").as_int();
+        overlap_roi_mode_ = this->get_parameter("overlap_roi_mode").as_string();
+        if (overlap_roi_mode_ != "dynamic_z" &&
+            overlap_roi_mode_ != "fixed" &&
+            overlap_roi_mode_ != "tf_only")
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "[ACCUMULATOR] Unknown overlap_roi_mode='%s'; defaulting to dynamic_z.",
+                overlap_roi_mode_.c_str());
+            overlap_roi_mode_ = "dynamic_z";
+        }
+        overlap_roi_axis_ = getStringParameter(*this, "overlap_roi_axis", "y");
+        if (overlap_roi_axis_ == "n") {
+            RCLCPP_WARN(this->get_logger(),
+                "[ACCUMULATOR] overlap_roi_axis was parsed as boolean false; defaulting to y.");
+            overlap_roi_axis_ = "y";
+        }
+        overlap_roi_ratio_ = this->get_parameter("overlap_roi_ratio").as_double();
+        dynamic_roi_bins_ = this->get_parameter("dynamic_roi_bins").as_int();
+        dynamic_roi_score_threshold_ = this->get_parameter("dynamic_roi_score_threshold").as_double();
+        dynamic_roi_min_bin_points_ = this->get_parameter("dynamic_roi_min_bin_points").as_int();
         floor_band_       = this->get_parameter("floor_band_m").as_double();
 
         try {
@@ -154,8 +452,10 @@ public:
 
         RCLCPP_INFO(this->get_logger(),
             "[ACCUMULATOR] Ready — structure-GICP + TF, fixed_frame=%s, prefix=%s, "
-            "corr=%.3fm, floor_band=+-%.1fmm",
-            fixed_frame_.c_str(), position_prefix_.c_str(), gicp_max_corr_, floor_band_ * 1000.0);
+            "corr=%.3fm, roi_mode=%s, roi_axis=%s, overlap_roi=%.0f%%, floor_band=+-%.1fmm",
+            fixed_frame_.c_str(), position_prefix_.c_str(), gicp_max_corr_,
+            overlap_roi_mode_.c_str(), overlap_roi_axis_.c_str(),
+            overlap_roi_ratio_ * 100.0, floor_band_ * 1000.0);
     }
 
 private:
@@ -300,7 +600,7 @@ private:
             y_min, y_max, y_max - y_min);
 
         // Save individual scan PCD: blockN/blockN_scanM.pcd
-        int block_num = scan_count_ / 3 + 1;
+        int block_num = current_block_index_;
         int scan_num  = block_scan_count_ + 1;
         std::string block_folder = output_directory_ + "/block" + std::to_string(block_num);
         try {
@@ -321,13 +621,20 @@ private:
         // 5. First scan -- store directly, no registration needed
         if (scan_count_ == 0 || accumulated_cloud_->empty()) {
             *accumulated_cloud_ += *scan_in_fixed;
-            prev_tf_translation_ = tf_t;
-            scan_count_++;
-            block_scan_count_++;
             RCLCPP_INFO(this->get_logger(),
                 "[ACCUMULATOR] Scan #1 stored (TF %s) -> Total: %zu pts",
                 have_tf ? "OK" : "IDENTITY-FALLBACK",
                 accumulated_cloud_->size());
+            finishScan(block_num, block_folder, tf_t);
+            return;
+        }
+
+        if (overlap_roi_mode_ == "tf_only") {
+            *accumulated_cloud_ += *scan_in_fixed;
+            RCLCPP_INFO(this->get_logger(),
+                "[ACCUMULATOR] Scan #%d: TF-only mode -> Total: %zu pts",
+                scan_count_ + 1, accumulated_cloud_->size());
+            finishScan(block_num, block_folder, tf_t);
             return;
         }
 
@@ -345,17 +652,42 @@ private:
 
         if (map_structure->size() < 100 || scan_structure->size() < 100) {
             *accumulated_cloud_ += *scan_in_fixed;
-            prev_tf_translation_ = tf_t;
-            scan_count_++;
-            block_scan_count_++;
             RCLCPP_WARN(this->get_logger(),
                 "[ACCUMULATOR] Scan #%d: too few structure pts -- TF-only -> Total: %zu pts",
-                scan_count_, accumulated_cloud_->size());
+                scan_count_ + 1, accumulated_cloud_->size());
+            finishScan(block_num, block_folder, tf_t);
             return;
         }
 
-        auto sg_target = toSmallGicp3D(map_structure);
-        auto sg_source = toSmallGicp3D(scan_structure);
+        const int axis_idx = (overlap_roi_axis_ == "x") ? 0 : 1;
+        RoiSelection roi_selection;
+        if (overlap_roi_mode_ == "dynamic_z") {
+            roi_selection = buildDynamicRoi(
+                map_structure, scan_structure, axis_idx,
+                dynamic_roi_bins_, dynamic_roi_score_threshold_, dynamic_roi_min_bin_points_);
+        } else if (overlap_roi_mode_ == "fixed") {
+            roi_selection.target = cropAxisEdge(map_structure, axis_idx, overlap_roi_ratio_, true);
+            roi_selection.source = cropAxisEdge(scan_structure, axis_idx, overlap_roi_ratio_, false);
+            roi_selection.info = overlap_roi_axis_ + std::string("-fixed ") +
+                                 std::to_string(static_cast<int>(overlap_roi_ratio_ * 100.0)) + "%";
+            roi_selection.valid = !roi_selection.target->empty() && !roi_selection.source->empty();
+        }
+
+        auto map_roi  = roi_selection.target;
+        auto scan_roi = roi_selection.source;
+
+        if (!roi_selection.valid || map_roi->size() < 100 || scan_roi->size() < 100) {
+            *accumulated_cloud_ += *scan_in_fixed;
+            RCLCPP_WARN(this->get_logger(),
+                "[ACCUMULATOR] Scan #%d: overlap ROI unavailable (%s, map=%zu scan=%zu) -- TF-only -> Total: %zu pts",
+                scan_count_ + 1, roi_selection.info.c_str(), map_roi->size(), scan_roi->size(),
+                accumulated_cloud_->size());
+            finishScan(block_num, block_folder, tf_t);
+            return;
+        }
+
+        auto sg_target = toSmallGicp3D(map_roi);
+        auto sg_source = toSmallGicp3D(scan_roi);
 
         auto [target_ds, target_tree] = small_gicp::preprocess_points(
             *sg_target, gicp_downsample_, GICP_NUM_NEIGHBORS, gicp_num_threads_);
@@ -363,8 +695,9 @@ private:
             *sg_source, gicp_downsample_, GICP_NUM_NEIGHBORS, gicp_num_threads_);
 
         RCLCPP_INFO(this->get_logger(),
-            "[ACCUMULATOR] GICP #%d: map_ds=%zu  scan_ds=%zu  corr=%.3fm",
-            scan_count_ + 1, target_ds->size(), source_ds->size(), gicp_max_corr_);
+            "[ACCUMULATOR] GICP #%d ROI: %s  map=%zu  scan=%zu  map_ds=%zu  scan_ds=%zu  corr=%.3fm",
+            scan_count_ + 1, roi_selection.info.c_str(), map_roi->size(), scan_roi->size(),
+            target_ds->size(), source_ds->size(), gicp_max_corr_);
 
         small_gicp::RegistrationSetting setting;
         setting.type = small_gicp::RegistrationSetting::GICP;
@@ -405,6 +738,11 @@ private:
                 result.iterations, dt_m, dr_deg, accumulated_cloud_->size());
         }
 
+        finishScan(block_num, block_folder, tf_t);
+    }
+
+    void finishScan(int block_num, const std::string& block_folder, const Eigen::Vector3d& tf_t)
+    {
         prev_tf_translation_ = tf_t;
         scan_count_++;
         block_scan_count_++;
@@ -430,8 +768,24 @@ private:
             } catch (const std::exception& e) {
                 RCLCPP_ERROR(this->get_logger(), "Failed to save merged block: %s", e.what());
             }
+
+            // Push the completed block immediately so map_merger has a fresh
+            // /scanner/merged_cloud before we clear local state.
+            sensor_msgs::msg::PointCloud2 out;
+            pcl::toROSMsg(*accumulated_cloud_, out);
+            out.header.frame_id = fixed_frame_;
+            out.header.stamp = this->get_clock()->now();
+            merged_publisher_->publish(out);
+            completed_block_ready_ = true;
+            completed_block_points_ = accumulated_cloud_->size();
+            RCLCPP_INFO(this->get_logger(),
+                "[ACCUMULATOR] Published completed block #%d on /scanner/merged_cloud",
+                block_num);
+
             accumulated_cloud_->clear(); // Start new block
+            scan_count_ = 0;
             block_scan_count_ = 0;
+            current_block_index_++;
         }
     }
 
@@ -487,9 +841,32 @@ private:
         std::lock_guard<std::mutex> lock(cloud_mutex_);
         accumulated_cloud_->clear();
         scan_count_          = 0;
+        block_scan_count_    = 0;
+        completed_block_ready_ = false;
+        completed_block_points_ = 0;
         floor_z_initialized_ = false;
         reference_floor_z_   = 0.0f;
         RCLCPP_INFO(this->get_logger(), "[ACCUMULATOR] Cache cleared");
+    }
+
+    // ---------------------------------------------------------------
+    // Completed block readiness
+    // ---------------------------------------------------------------
+    void blockReadyCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        std::lock_guard<std::mutex> lock(cloud_mutex_);
+        response->success = completed_block_ready_;
+        if (completed_block_ready_) {
+            response->message = "Block #" + std::to_string(current_block_index_ - 1) +
+                                " ready on /scanner/merged_cloud (" +
+                                std::to_string(completed_block_points_) + " pts)";
+        } else {
+            response->message = "Waiting for block completion: scan " +
+                                std::to_string(block_scan_count_) + "/3, " +
+                                std::to_string(accumulated_cloud_->size()) + " pts buffered";
+        }
     }
 
     // ---------------------------------------------------------------
@@ -512,6 +889,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    merged_publisher_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr             save_service_;
     rclcpp::Service<std_srvs::srv::Empty>::SharedPtr               clear_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr             block_ready_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr             count_service_;
     rclcpp::TimerBase::SharedPtr                                   publish_timer_;
 
@@ -529,6 +907,9 @@ private:
     std::mutex cloud_mutex_;
     int scan_count_;
     int block_scan_count_;
+    int current_block_index_ = 1;
+    bool completed_block_ready_ = false;
+    size_t completed_block_points_ = 0;
 
     std::string fixed_frame_;
     std::string output_directory_;
@@ -537,6 +918,12 @@ private:
     int    gicp_max_iter_;
     double gicp_downsample_;
     int    gicp_num_threads_;
+    std::string overlap_roi_mode_;
+    std::string overlap_roi_axis_;
+    double overlap_roi_ratio_;
+    int    dynamic_roi_bins_;
+    double dynamic_roi_score_threshold_;
+    int    dynamic_roi_min_bin_points_;
     double floor_band_;
 };
 

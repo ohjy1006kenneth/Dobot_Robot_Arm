@@ -9,9 +9,11 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(dobot_msgs_v4 REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 add_executable(script_runner src/script_runner.cpp)
-ament_target_dependencies(script_runner rclcpp dobot_msgs_v4)
+ament_target_dependencies(script_runner rclcpp dobot_msgs_v4 std_msgs std_srvs)
 
 install(TARGETS
   script_runner
