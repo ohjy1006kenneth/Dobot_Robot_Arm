@@ -16,7 +16,12 @@
   </link>
 
   <joint name="ranger_to_dobot" type="fixed">
-    <origin xyz="-0.4 0 0.2" rpy="0 0 0" />
+    <!--
+      base_link +X is defined as the arm/peripheral side.
+      The Ranger hardware front is opposite this, so the arm mount is the
+      original hardware-frame pose transformed through a 180-degree yaw.
+    -->
+    <origin xyz="0.4 0 0.2" rpy="0 0 3.1415927" />
     <parent link="base_link" />
     <child link="dobot_dummy_link" />
   </joint>

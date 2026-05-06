@@ -21,6 +21,8 @@ def generate_launch_description():
                                                 description='Base link frame id')
     odom_topic_arg = DeclareLaunchArgument('odom_topic_name', default_value='odom',
                                            description='Odometry topic name')
+    cmd_vel_topic_arg = DeclareLaunchArgument('cmd_vel_topic', default_value='/cmd_vel',
+                                           description='Command velocity topic name')
 
     simulated_robot_arg = DeclareLaunchArgument('simulated_robot', default_value='false',
                                                    description='Whether running with simulator')
@@ -35,6 +37,9 @@ def generate_launch_description():
         executable='ranger_base_node',
         output='screen',
         emulate_tty=True,
+        remappings=[
+            ('/cmd_vel', launch.substitutions.LaunchConfiguration('cmd_vel_topic')),
+        ],
         parameters=[{
                 # 'use_sim_time': launch.substitutions.LaunchConfiguration('use_sim_time'),
                 'port_name': launch.substitutions.LaunchConfiguration('port_name'),                
@@ -51,6 +56,7 @@ def generate_launch_description():
         odom_frame_arg,
         base_link_frame_arg,
         odom_topic_arg,
+        cmd_vel_topic_arg,
         simulated_robot_arg,
         publish_odom_tf_arg,
         update_rate_arg,

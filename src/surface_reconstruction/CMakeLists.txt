@@ -14,6 +14,10 @@ find_package(action_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(unique_identifier_msgs REQUIRED)
 
 # IMU unit relay node (g -> m/s²)
@@ -34,6 +38,20 @@ ament_target_dependencies(
   unique_identifier_msgs
 )
 install(TARGETS nav2_arrival_trigger DESTINATION lib/${PROJECT_NAME})
+
+# Reverse Ranger mount adapter: Nav2 uses the peripheral side as +X while
+# the Ranger hardware driver keeps its native +X.
+add_executable(reverse_ranger_mount_adapter src/reverse_ranger_mount_adapter.cpp)
+ament_target_dependencies(
+  reverse_ranger_mount_adapter
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+install(TARGETS reverse_ranger_mount_adapter DESTINATION lib/${PROJECT_NAME})
 
 install(
   DIRECTORY launch urdf config map
