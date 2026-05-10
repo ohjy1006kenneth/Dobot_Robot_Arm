@@ -1,0 +1,32 @@
+repositories:
+  src/DOBOT_6Axis_ROS2_V4:
+    type: git
+    url: https://github.com/Dobot-Arm/DOBOT_6Axis_ROS2_V4.git
+    version: a9cfc3e2035d310c0348e236d65c2c33cf988c1e
+  src/ranger_ros2:
+    type: git
+    url: https://github.com/westonrobot/ranger_ros2.git
+    version: 4357bdfb9fda828e4b84880e9c34a874cf060b80
+  src/ugv_sdk:
+    type: git
+    url: https://github.com/westonrobot/ugv_sdk.git
+    version: 58436e9c1732474566e249ce7f726e12e26304d6
+  src/rslidar_sdk:
+    type: git
+    url: https://github.com/RoboSense-LiDAR/rslidar_sdk.git
+    version: 7c4ea25fada93442c3d390aa4ef05e240999b851
+  src/rslidar_msg:
+    type: git
+    url: https://github.com/RoboSense-LiDAR/rslidar_msg.git
+    version: fe8a95cb242bd294cc3d5e3422f2093fb49a56ee
+  src/small_gicp:
+    type: git
+    url: https://github.com/koide3/small_gicp.git
+    version: 78f2e7a221720625eb95271ad9da21a04fb77f86
+  # Optional: Orbbec depth-camera driver (legacy vision-based pipeline).
+  # Not used by the active surface-reconstruction pipeline.
+  # Comment out the block below if you don't need it.
+  src/OrbbecSDK_ROS2:
+    type: git
+    url: https://github.com/orbbec/OrbbecSDK_ROS2.git
+    version: c780bc110826536500dd706baa1eca8392ed39cb

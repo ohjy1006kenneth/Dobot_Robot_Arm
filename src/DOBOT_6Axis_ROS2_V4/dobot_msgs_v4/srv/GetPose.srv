@@ -1,5 +1,0 @@
-int32 user
-int32 tool
----
-string robot_return
-int32 res

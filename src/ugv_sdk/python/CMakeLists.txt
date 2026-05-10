@@ -1,2 +1,0 @@
-add_subdirectory(pybind11)
-add_subdirectory(ugv_sdk_py)

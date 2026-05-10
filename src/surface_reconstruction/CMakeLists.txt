@@ -20,11 +20,6 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(unique_identifier_msgs REQUIRED)
 
-# IMU unit relay node (g -> m/s²)
-add_executable(imu_g_to_ms2_relay src/imu_g_to_ms2_relay.cpp)
-ament_target_dependencies(imu_g_to_ms2_relay rclcpp sensor_msgs)
-install(TARGETS imu_g_to_ms2_relay DESTINATION lib/${PROJECT_NAME})
-
 # Nav2 arrival -> /start_repair trigger
 add_executable(nav2_arrival_trigger src/nav2_arrival_trigger.cpp)
 ament_target_dependencies(

@@ -1,74 +1,99 @@
-# === ROS 2 colcon build artifacts ===
+# =============================================================================
+# .gitignore for Dobot_Robot_Arm
+#   ROS2 mobile surface-reconstruction workspace
+#   (DOBOT 6-axis arm + KSJ laser profiler + RoboSense LiDAR + Ranger UGV)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ROS 2 / colcon build artifacts
+# -----------------------------------------------------------------------------
 build/
 install/
 log/
 Log/
+.colcon/
 
-# === Large data files (scans, development tools) ===
+# -----------------------------------------------------------------------------
+# Third-party packages restored via vcstool (dependencies.repos)
+#   Do NOT commit upstream source trees. Users run:
+#     vcs import src < dependencies.repos
+# -----------------------------------------------------------------------------
+/src/DOBOT_6Axis_ROS2_V4/
+/src/ranger_ros2/
+/src/ugv_sdk/
+/src/rslidar_sdk/
+/src/rslidar_msg/
+/src/small_gicp/
+/src/OrbbecSDK_ROS2/
+
+# -----------------------------------------------------------------------------
+# Recorded data and reconstruction outputs (large, not source)
+# -----------------------------------------------------------------------------
+*.pcd
+*.ply
+*.bag
+*.bag2
+*.db3
+*.g2o
+*.zip
 map/
 maps/
 scan/
 scans/
-*.pcd
-*.zip
+blocks/**/block*.ply
 Development-Linux_x64/
 
-# === Python artifacts ===
+# -----------------------------------------------------------------------------
+# CMake artifacts (when running cmake outside colcon)
+# -----------------------------------------------------------------------------
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.egg-info/
 .eggs/
+/.venv/
+venv/
 
-# === CMake artifacts ===
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-
-# === VSCode / JetBrains IDEs ===
+# -----------------------------------------------------------------------------
+# Editors / IDEs
+# -----------------------------------------------------------------------------
 .vscode/
 .idea/
-
-# === ROS launch/config files (optional, comment out if you want to include these) ===
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
 *.launch.py~
 *.yaml~
 *.rviz~
 
-# === Backup files ===
-*~
-*.swp
-*.swo
-*.bak
-*.tmp
+# -----------------------------------------------------------------------------
+# tf2_tools view_frames output (regenerable diagnostic artifact)
+# -----------------------------------------------------------------------------
+frames_*.gv
+frames_*.pdf
 
-# === Colcon metadata ===
-.colcon/
-
-# === Git keep marker ===
-!.gitkeep
-
-# === ROS 2 Doxygen/docs (optional) ===
-docs/
-
-# === Misc ===
+# -----------------------------------------------------------------------------
+# OS noise
+# -----------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 
-# Large generated artifacts
-*.ply
-*.pcd
-*.bag
-*.bag2
-*.db3
-blocks/**/block*.ply
+# -----------------------------------------------------------------------------
+# Doxygen / build docs
+# -----------------------------------------------------------------------------
+docs/
 
-# ROS 2 build/install/log
-build/
-install/
-log/
-
-# Python
-__pycache__/
-*.pyc
-
+# -----------------------------------------------------------------------------
+# Whitelist
+# -----------------------------------------------------------------------------
+!.gitkeep
